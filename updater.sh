@@ -31,60 +31,58 @@ done
 # Вытаскиваем чистые ссылки протоколов
 grep -oE '(vless|ss|vmess|trojan|hysteria2|hy2)://[^"& ]+' raw_configs.txt | sort -u > clean_configs.txt
 total_servers=$(wc -l < clean_configs.txt)
-echo "Успешно скачано серверов благодаря маскировке: $total_servers"
+echo "Успешно скачано серверов для переименования: $total_servers"
 
-echo "=== Старт проверки портов и гео-определения ==="
-# Работаем в параллельных потоках, чтобы уложиться в лимиты времени
+echo "=== Старт расстановки флагов ==="
 while read -r line; do
-    ((proxy_count=proxy_count%50)); ((proxy_count++==0)) && wait
+    # 1. Проверяем, есть ли уже эмодзи-флаг в оригинальной строке
+    flag=$(echo "$line" | grep -oP '[\x{1F1E6}-\x{1F1FF}]{2}' 2>/dev/null | head -n 1)
+
+    # 2. Если флага-смайлика нет, ищем текстовые совпадения (строго на английском!)
+    if [ -z "$flag" ]; then
+        if echo "$line" | grep -riqE '(netherlands|🇳🇱|\bNL\b)'; then flag="🇳🇱"
+        elif echo "$line" | grep -riqE '(united states|america|🇺🇸|\bUS\b|\bUSA\b)'; then flag="🇺🇸"
+        elif echo "$line" | grep -riqE '(germany|🇩🇪|\bDE\b)'; then flag="🇩🇪"
+        elif echo "$line" | grep -riqE '(finland|🇫🇮|\bFI\b)'; then flag="🇫🇮"
+        elif echo "$line" | grep -riqE '(france|🇫🇷|\bFR\b)'; then flag="🇫🇷"
+        elif echo "$line" | grep -riqE '(sweden|🇸🇪|\bSE\b)'; then flag="🇸🇪"
+        elif echo "$line" | grep -riqE '(poland|🇵🇱|\bPL\b)'; then flag="🇵🇱"
+        elif echo "$line" | grep -riqE '(kazakhstan|🇰🇿|\bKZ\b)'; then flag="🇰🇿"
+        elif echo "$line" | grep -riqE '(japan|🇯🇵|\bJP\b)'; then flag="🇯🇵"
+        elif echo "$line" | grep -riqE '(korea|🇰🇷|\bKR\b)'; then flag="🇰🇷"
+        elif echo "$line" | grep -riqE '(singapore|🇸🇬|\bSG\b)'; then flag="🇸🇬"
+        elif echo "$line" | grep -riqE '(turkey|🇹🇷|\bTR\b)'; then flag="🇹🇷"
+        elif echo "$line" | grep -riqE '(hong kong|🇭🇰|\bHK\b)'; then flag="🇭🇰"
+        elif echo "$line" | grep -riqE '(united arab|emirates|🇦🇪|\bAE\b)'; then flag="🇦🇪"
+        elif echo "$line" | grep -riqE '(united kingdom|london|🇬🇧|\bUK\b|\bGB\b)'; then flag="🇬🇧"
+        elif echo "$line" | grep -riqE '(latvia|🇱🇻|\bLV\b)'; then flag="🇱🇻"
+        elif echo "$line" | grep -riqE '(estonia|🇪🇪|\bEE\b)'; then flag="🇪🇪"
+        elif echo "$line" | grep -riqE '(austria|🇦🇹|\bAT\b)'; then flag="🇦🇹"
+        elif echo "$line" | grep -riqE '(switzerland|🇨🇭|\bCH\b)'; then flag="🇨🇭"
+        elif echo "$line" | grep -riqE '(canada|🇨🇦|\bCA\b)'; then flag="🇨🇦"
+        elif echo "$line" | grep -riqE '(australia|🇦🇺|\bAU\b)'; then flag="🇦🇺"
+        elif echo "$line" | grep -riqE '(spain|🇪🇸|\bES\b)'; then flag="🇪🇸"
+        elif echo "$line" | grep -riqE '(italy|🇮🇹|\bIT\b)'; then flag="🇮🇹"
+        elif echo "$line" | grep -riqE '(ukraine|🇺🇦|\bUA\b)'; then flag="🇺🇦"
+        else flag="🌐"
+        fi
+    fi
+
+    # Собираем имя
+    new_name="qwils [UPDATE] ${flag}"
     
-    {
-        server_host=$(echo "$line" | grep -oE '@[^:]+' | tr -d '@' | head -n 1)
-        server_port=$(echo "$line" | grep -oE ':[0-9]+' | tr -d ':' | head -n 1)
-        
-        if [ ! -z "$server_host" ] && [ ! -z "$server_port" ]; then
-            # Проверяем доступность порта сервера
-            if nc -z -w 3 "$server_host" "$server_port" > /dev/null 2>&1; then
-                
-                # Запрос гео-определения страны
-                country_code=$(curl -s --connect-timeout 2 "https://ipapi.co")
-                
-                if [ -z "$country_code" ] || [ ${#country_code} -gt 3 ]; then
-                    country_code="UN"
-                else
-                    country_code=$(echo "$country_code" | tr '[:lower:]' '[:upper:]')
-                fi
-                
-                # Формат названия: СТРАНА_КОД qwils [UPDATE]
-                new_name="${country_code} qwils [UPDATE]"
-                
-                if [[ "$line" == *#* ]]; then
-                    cleaned_line=$(echo "$line" | cut -d'#' -f1)
-                    echo "${cleaned_line}#${new_name}" >> filtered_configs.txt
-                else
-                    echo "${line}#${new_name}" >> filtered_configs.txt
-                fi
-            fi
-        fi
-    } &
+    # Меняем название после знака #
+    if [[ "$line" == *#* ]]; then
+        cleaned_line=$(echo "$line" | cut -d'#' -f1)
+        echo "${cleaned_line}#${new_name}" >> filtered_configs.txt
+    else
+        echo "${line}#${new_name}" >> filtered_configs.txt
+    fi
 done < clean_configs.txt
-wait
 
-# Если жесткий отбор отсеял всё, сохраняем базовый список с пометкой UN
-if [ ! -s filtered_configs.txt ]; then
-    while read -r line; do
-        if [[ "$line" == *#* ]]; then
-            cleaned_line=$(echo "$line" | cut -d'#' -f1)
-            echo "${cleaned_line}#UN qwils [UPDATE]" >> filtered_configs.txt
-        else
-            echo "${line}#UN qwils [UPDATE]" >> filtered_configs.txt
-        fi
-    done < clean_configs.txt
-fi
-
-# Кодируем в Base64 для Happ
+# Упаковываем результат в Base64
 base64 -w 0 filtered_configs.txt > subscription.txt
 
 # Полная очистка мусора
 rm -f raw_configs.txt clean_configs.txt filtered_configs.txt
-echo "=== Успешно завершено! ==="
+echo "=== Все проверки успешно завершены! ==="
