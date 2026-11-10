@@ -2,8 +2,8 @@ name: Auto Update VPN Subscription
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # Робот будет автоматически запускаться каждый день в 03:00 ночи по UTC (06:00 по МСК)
-  workflow_dispatch:     # Позволяет также запускать сборщик вручную кнопкой, если нужно обновить прямо сейчас
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   update:
@@ -15,10 +15,10 @@ jobs:
       - name: Run updater script
         run: bash updater.sh
 
-      - name: Commit and Push changes back to repo
+      - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.email "github-actions[bot]@://github.com"
           git add subscription.txt
           git commit -m "Automated update: Checked and cleaned VPN nodes" || exit 0
           git push
