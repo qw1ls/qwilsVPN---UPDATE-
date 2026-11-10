@@ -33,12 +33,12 @@ grep -oE '(vless|ss|vmess|trojan|hysteria2|hy2)://[^"& ]+' raw_configs.txt | sor
 total_servers=$(wc -l < clean_configs.txt)
 echo "Успешно скачано серверов для переименования: $total_servers"
 
-echo "=== Старт умной расстановки эмодзи-флагов ==="
+echo "=== Старт расстановки флагов ==="
 while read -r line; do
     # 1. Проверяем, есть ли уже эмодзи-флаг в оригинальной строке
     flag=$(echo "$line" | grep -oP '[\x{1F1E6}-\x{1F1FF}]{2}' 2>/dev/null | head -n 1)
 
-    # 2. Если флага-смайлика нет, ищем текстовые совпадения стран по ключевым буквам
+    # 2. Если флага-смайлика нет, ищем текстовые совпадения
     if [ -z "$flag" ]; then
         if echo "$line" | grep -riqE '(netherlands|🇳🇱|\bNL\b)'; then flag="🇳🇱"
         elif echo "$line" | grep -riqE '(united states|america|🇺🇸|\bUS\b|\bUSA\b)'; then flag="🇺🇸"
@@ -55,7 +55,7 @@ while read -r line; do
         elif echo "$line" | grep -riqE '(hong kong|🇭🇰|\bHK\b)'; then flag="🇭🇰"
         elif echo "$line" | grep -riqE '(united arab|emirates|🇦🇪|\bAE\b)'; then flag="🇦🇪"
         elif echo "$line" | grep -riqE '(united kingdom|london|🇬🇧|\bUK\b|\bGB\b)'; then flag="🇬🇧"
-        elif echo "$line" | grep -riqE '(latvia|🇱вих|\bLV\b)'; then flag="🇱🇻"
+        elif echo "$line" | grep -riqE '(latvia|🇱🇻|\bLV\b)'; then flag="🇱🇻"
         elif echo "$line" | grep -riqE '(estonia|🇪🇪|\bEE\b)'; then flag="🇪🇪"
         elif echo "$line" | grep -riqE '(austria|🇦🇹|\bAT\b)'; then flag="🇦🇹"
         elif echo "$line" | grep -riqE '(switzerland|🇨🇭|\bCH\b)'; then flag="🇨🇭"
@@ -64,14 +64,14 @@ while read -r line; do
         elif echo "$line" | grep -riqE '(spain|🇪🇸|\bES\b)'; then flag="🇪🇸"
         elif echo "$line" | grep -riqE '(italy|🇮🇹|\bIT\b)'; then flag="🇮🇹"
         elif echo "$line" | grep -riqE '(ukraine|🇺🇦|\bUA\b)'; then flag="🇺🇦"
-        else flag="🌐" # Дефолтный глобус, если страна неопределенна
+        else flag="🌐"
         fi
     fi
 
-    # Собираем красивое итоговое имя для Happ (флаг ставим в конец, чтобы он отображался на экране)
+    # Собираем имя
     new_name="qwils [UPDATE] ${flag}"
     
-    # Меняем старое название на наше новое после знака #
+    # Меняем название после знака #
     if [[ "$line" == *#* ]]; then
         cleaned_line=$(echo "$line" | cut -d'#' -f1)
         echo "${cleaned_line}#${new_name}" >> filtered_configs.txt
@@ -80,10 +80,9 @@ while read -r line; do
     fi
 done < clean_configs.txt
 
-# Упаковываем готовый результат в Base64 для вашего Happ
+# Упаковываем результат в Base64
 base64 -w 0 filtered_configs.txt > subscription.txt
 
 # Полная очистка мусора
 rm -f raw_configs.txt clean_configs.txt filtered_configs.txt
 echo "=== Все проверки успешно завершены! ==="
-
