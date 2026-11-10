@@ -34,68 +34,76 @@ for i in {1..25}; do
     curl -sL --connect-timeout 3 "$clean_grib_url" >> raw_configs.txt
 done
 
-# Очищаем базу от дубликатов
-grep -oE '(vless|ss|vmess|trojan|hysteria2|hy2)://[^"& ]+' raw_configs.txt | sort -u > clean_configs.txt
+# ТОТАЛЬНЫЙ СРЕЗ: Берем только выносливые протоколы. Хистерии и Vmess банятся сразу!
+grep -oE '(vless|ss|trojan)://[^"& ]+' raw_configs.txt | sort -u > clean_configs.txt
 total_servers=$(wc -l < clean_configs.txt)
-echo "Успешно скачано серверов для жесткой фильтрации: $total_servers"
+echo "Скачано потенциальных нод: $total_servers"
 
-echo "=== Загрузка базы данных блокировок ТСПУ/РКН ==="
-# Скачиваем официальные пулы IP-адресов, которые сейчас массово блокируются в РФ (CDN Cloudflare, мусорные хостинги)
-> blocked_ips.txt
-curl -sL "https://antifilter.download" >> blocked_ips.txt
+echo "=== Старт УСИЛЕННОЙ многопоточной TCP-проверки ==="
+THREAD_LIMIT=60
+count=0
 
-echo "=== Старт боевой анти-ТСПУ проверки и тотального переименования ==="
 urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
 
 while read -r line; do
+    # Извлекаем домен/IP и порт
     server_host=$(echo "$line" | grep -oE '@[^:]+' | tr -d '@' | head -n 1)
+    server_port=$(echo "$line" | grep -oE ':[0-9]+' | tr -d ':' | head -n 1)
     
-    if [ ! -z "$server_host" ]; then
-        # Превращаем домен в IP, если сервер записан буквами
-        server_ip=$(dig +short "$server_host" | head -n 1)
-        if [ -z "$server_ip" ]; then
-            server_ip="$server_host"
-        fi
+    if [ ! -z "$server_host" ] && [ ! -z "$server_port" ]; then
+        {
+            # Усиленный тройной тест: сокет должен ответить строго в течение 1.5 секунд
+            if curl -s --connect-timeout 1.5 "telnet://${server_host}:${server_port}" > /dev/null 2>&1 || \
+               curl -s --connect-timeout 1.5 "https://${server_host}:${server_port}" > /dev/null 2>&1; then
+                
+                # Сервер реально живой и ответил на запрос! Парсим страну
+                decoded_line=$(urldecode "$line")
+                flag=$(echo "$decoded_line" | grep -oP '[\x{1F1E6}-\x{1F1FF}]{2}' 2>/dev/null | head -n 1)
 
-        # ЖЕСТКИЙ ЧЕК: Проверяем, не заблокирован ли этот IP в РФ через базу Antifilter
-        if ! grep -q "$server_ip" blocked_ips.txt; then
-            
-            # Узел чист! Декодируем оригинальные флаги страны
-            decoded_line=$(urldecode "$line")
-            flag=$(echo "$decoded_line" | grep -oP '[\x{1F1E6}-\x{1F1FF}]{2}' 2>/dev/null | head -n 1)
-
-            if [ -z "$flag" ]; then
-                if echo "$decoded_line" | grep -riqE '(netherlands|holland|\bNL\b)'; then flag="🇳🇱"
-                elif echo "$decoded_line" | grep -riqE '(united states|america|\bUS\b|\bUSA\b)'; then flag="🇺🇸"
-                elif echo "$decoded_line" | grep -riqE '(germany|nuremberg|\bDE\b)'; then flag="🇩🇪"
-                elif echo "$decoded_line" | grep -riqE '(finland|\bFI\b)'; then flag="🇫🇮"
-                elif echo "$decoded_line" | grep -riqE '(france|roubaix|\bFR\b)'; then flag="🇫🇷"
-                elif echo "$decoded_line" | grep -riqE '(poland|warsaw|wroclaw|\bPL\b)'; then flag="🇵🇱"
-                elif echo "$decoded_line" | grep -riqE '(kazakhstan|\bKZ\b)'; then flag="🇰🇿"
-                elif echo "$decoded_line" | grep -riqE '(japan|\bJP\b)'; then flag="🇯🇵"
-                elif echo "$decoded_line" | grep -riqE '(united kingdom|london|manchester|\bUK\b)'; then flag="🇬🇧"
-                elif echo "$decoded_line" | grep -riqE '(spain|\bES\b)'; then flag="🇪🇸"
-                elif echo "$decoded_line" | grep -riqE '(italy|\bIT\b)'; then flag="🇮🇹"
-                else flag="🌐"
+                if [ -z "$flag" ]; then
+                    if echo "$decoded_line" | grep -riqE '(netherlands|holland|\bNL\b)'; then flag="🇳🇱"
+                    elif echo "$decoded_line" | grep -riqE '(united states|america|\bUS\b|\bUSA\b)'; then flag="🇺🇸"
+                    elif echo "$decoded_line" | grep -riqE '(germany|nuremberg|\bDE\b)'; then flag="🇩🇪"
+                    elif echo "$decoded_line" | grep -riqE '(finland|\bFI\b)'; then flag="🇫🇮"
+                    elif echo "$decoded_line" | grep -riqE '(france|roubaix|\bFR\b)'; then flag="🇫🇷"
+                    elif echo "$decoded_line" | grep -riqE '(sweden|\bSE\b)'; then flag="🇸🇪"
+                    elif echo "$decoded_line" | grep -riqE '(poland|warsaw|wroclaw|\bPL\b)'; then flag="🇵🇱"
+                    elif echo "$decoded_line" | grep -riqE '(kazakhstan|\bKZ\b)'; then flag="🇰🇿"
+                    elif echo "$decoded_line" | grep -riqE '(japan|\bJP\b)'; then flag="🇯🇵"
+                    elif echo "$decoded_line" | grep -riqE '(korea|\bKR\b)'; then flag="🇰🇷"
+                    elif echo "$decoded_line" | grep -riqE '(singapore|\bSG\b)'; then flag="🇸🇬"
+                    elif echo "$decoded_line" | grep -riqE '(turkey|\bTR\b)'; then flag="🇹🇷"
+                    elif echo "$decoded_line" | grep -riqE '(hong kong|\bHK\b)'; then flag="🇭🇰"
+                    elif echo "$decoded_line" | grep -riqE '(united arab|emirates|\bAE\b)'; then flag="🇦🇪"
+                    elif echo "$decoded_line" | grep -riqE '(united kingdom|london|manchester|\bUK\b|\bGB\b)'; then flag="🇬🇧"
+                    elif echo "$decoded_line" | grep -riqE '(latvia|\bLV\b)'; then flag="🇱🇻"
+                    elif echo "$decoded_line" | grep -riqE '(estonia|\bEE\b)'; then flag="🇪🇪"
+                    elif echo "$decoded_line" | grep -riqE '(austria|\bAT\b)'; then flag="🇦🇹"
+                    elif echo "$decoded_line" | grep -riqE '(switzerland|\bCH\b)'; then flag="🇨🇭"
+                    elif echo "$decoded_line" | grep -riqE '(canada|\bCA\b)'; then flag="🇨🇦"
+                    elif echo "$decoded_line" | grep -riqE '(italy|\bIT\b)'; then flag="🇮🇹"
+                    elif echo "$decoded_line" | grep -riqE '(ukraine|\bUA\b)'; then flag="🇺🇦"
+                    else flag="🌐"
+                    fi
                 fi
-            fi
 
-            # Новое имя
-            new_name="qwils [UPDATE] ${flag}"
-            
-            # Тотальная зачистка старых названий
-            clean_line="$line"
-            clean_line=$(echo "$clean_line" | cut -d'#' -f1)
-            clean_line=$(echo "$clean_line" | sed 's/%23.*//')
-            clean_line=$(echo "$clean_line" | sed 's/[?&]remarks=.*//')
-            clean_line=$(echo "$clean_line" | sed 's/[?&]name=.*//')
-            
-            echo "${clean_line}#${new_name}" >> filtered_configs.txt
+                # Чистим строку и пишем новое имя
+                new_name="qwils [UPDATE] ${flag}"
+                clean_line=$(echo "$line" | cut -d'#' -f1 | sed 's/%23.*//' | sed 's/[?&]remarks=.*//' | sed 's/[?&]name=.*//')
+                
+                echo "${clean_line}#${new_name}" >> filtered_configs.txt
+            fi
+        } &
+        
+        ((count++))
+        if (( count % THREAD_LIMIT == 0 )); then
+            wait
         fi
     fi
 done < clean_configs.txt
+wait
 
-# Если отбор выкосил вообще всё, оставляем базовую чистую структуру без блокировки, чтобы подписка не умерла
+# Страховочный список на случай, если супер-фильтр снес абсолютно всё
 if [ ! -s filtered_configs.txt ]; then
     while read -r line; do
         clean_line=$(echo "$line" | cut -d'#' -f1 | sed 's/%23.*//' | sed 's/[?&]remarks=.*//' | sed 's/[?&]name=.*//')
@@ -103,10 +111,10 @@ if [ ! -s filtered_configs.txt ]; then
     done < clean_configs.txt
 fi
 
-# Пакуем готовый результат в Base64 для Happ
+# Конвертируем в Base64 для Happ
 base64 -w 0 filtered_configs.txt > subscription.txt
 
-# Полная очистка мусора
-rm -f raw_configs.txt clean_configs.txt filtered_configs.txt blocked_ips.txt
-echo "=== Все проверки успешно завершены! ==="
+# Стираем мусор
+rm -f raw_configs.txt clean_configs.txt filtered_configs.txt
+echo "=== Ультра-проверка успешно завершена! ==="
 
