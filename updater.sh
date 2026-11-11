@@ -1,10 +1,17 @@
 #!/bin/bash
 
+echo "=== Скачивание ядра Xray для реальной проверки туннелей ==="
+curl -sL -o xray.zip "https://github.com"
+unzip -q -o xray.zip xray
+chmod +x xray
+rm -f xray.zip
+
 python3 - << 'EOF'
 import urllib.request
 import urllib.parse
+import subprocess
 import socket
-import ssl
+import time
 import re
 import json
 import base64
@@ -31,105 +38,26 @@ def fetch_url(url):
     except Exception:
         return ""
 
-print("=== 1. Скачивание всех 30 источников ===")
+print("=== 1. Сбор источников ===")
 with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
     texts = list(executor.map(fetch_url, urls))
 
 raw_data = "\n".join(texts)
-raw_links = set(re.findall(r'(?:vless|ss|trojan)://[^\s"\'<>]+', raw_data))
-print(f"Найдено уникальных строк: {len(raw_links)}")
+raw_links = set(re.findall(r'(?:vless|trojan)://[^\s"\'<>]+', raw_data))
 
 unique_endpoints = {}
 for link in raw_links:
-    base_link = link.split('#')[0]
-    base_link = re.sub(r'%23.*', '', base_link)
+    base_link = re.sub(r'%23.*', '', link.split('#'))
     m = re.search(r'@([^:/?#]+):(\d+)', base_link)
     if m:
         host, port = m.group(1), int(m.group(2))
         if host not in ('127.0.0.1', '0.0.0.0', 'localhost') and 1 <= port <= 65535:
-            proto = base_link.split('://')[0]
-            key = f"{proto}://{host}:{port}"
+            key = f"{host}:{port}"
             if key not in unique_endpoints:
-                unique_endpoints[key] = (link, base_link, host, port)
+                unique_endpoints[key] = (link, base_link)
 
-print(f"После удаления дублей узлов осталось для проверки: {len(unique_endpoints)}")
-
-def check_server(item):
-    orig_link, base_link, host, port = item
-    try:
-        with socket.create_connection((host, port), timeout=2.5) as sock:
-            if 'security=tls' in base_link or 'security=reality' in base_link or base_link.startswith('trojan://'):
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                    pass
-        return (orig_link, base_link, host, port)
-    except Exception:
-        return None
-
-print("=== 2. Запуск глубокой TCP/TLS проверки в 100 потоков ===")
-alive_servers = []
-with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
-    for res in executor.map(check_server, unique_endpoints.values()):
-        if res is not None:
-            alive_servers.append(res)
-
-print(f"Проверка завершена! Выжило рабочих серверов: {len(alive_servers)}")
-
-countries = [
-    (r'(netherlands|holland|\bNL\b)', '🇳🇱', 'Нидерланды'),
-    (r'(united states|america|\bUS\b|\bUSA\b)', '🇺🇸', 'США'),
-    (r'(germany|nuremberg|frankfurt|\bDE\b)', '🇩🇪', 'Германия'),
-    (r'(finland|helsinki|\bFI\b)', '🇫🇮', 'Финляндия'),
-    (r'(france|roubaix|paris|\bFR\b)', '🇫🇷', 'Франция'),
-    (r'(sweden|stockholm|\bSE\b)', '🇸🇪', 'Швеция'),
-    (r'(poland|warsaw|wroclaw|\bPL\b)', '🇵🇱', 'Польша'),
-    (r'(kazakhstan|almaty|\bKZ\b)', '🇰🇿', 'Казахстан'),
-    (r'(japan|tokyo|inzai|\bJP\b)', '🇯🇵', 'Япония'),
-    (r'(korea|seoul|\bKR\b)', '🇰🇷', 'Южная Корея'),
-    (r'(singapore|\bSG\b)', '🇸🇬', 'Сингапур'),
-    (r'(turkey|istanbul|sultanbeyli|\bTR\b)', '🇹🇷', 'Турция'),
-    (r'(hong kong|\bHK\b)', '🇭🇰', 'Гонконг'),
-    (r'(united arab|emirates|dubai|\bAE\b)', '🇦🇪', 'ОАЭ'),
-    (r'(united kingdom|london|manchester|\bUK\b|\bGB\b)', '🇬🇧', 'Великобритания'),
-    (r'(latvia|riga|\bLV\b)', '🇱🇻', 'Латвия'),
-    (r'(estonia|tallinn|\bEE\b)', '🇪🇪', 'Эстония'),
-    (r'(lithuania|vilnius|\bLT\b)', '🇱🇹', 'Литва'),
-    (r'(austria|vienna|\bAT\b)', '🇦🇹', 'Австрия'),
-    (r'(switzerland|zurich|\bCH\b)', '🇨🇭', 'Швейцария'),
-    (r'(canada|montreal|toronto|\bCA\b)', '🇨🇦', 'Канада'),
-    (r'(spain|madrid|\bES\b)', '🇪🇸', 'Испания'),
-    (r'(italy|milan|\bIT\b)', '🇮🇹', 'Италия'),
-    (r'(ukraine|kyiv|\bUA\b)', '🇺🇦', 'Украина'),
-    (r'(belarus|minsk|\bBY\b)', '🇧🇾', 'Беларусь'),
-    (r'(czechia|czech|prague|\bCZ\b)', '🇨🇿', 'Чехия'),
-    (r'(india|delhi|mumbai|\bIN\b)', '🇮🇳', 'Индия'),
-    (r'(australia|sydney|\bAU\b)', '🇦🇺', 'Австралия'),
-    (r'(brazil|sao paulo|\bBR\b)', '🇧🇷', 'Бразилия'),
-    (r'(bulgaria|sofia|\bBG\b)', '🇧🇬', 'Болгария'),
-    (r'(romania|bucharest|\bRO\b)', '🇷🇴', 'Румыния'),
-    (r'(ireland|dublin|\bIE\b)', '🇮🇪', 'Ирландия'),
-    (r'(norway|oslo|\bNO\b)', '🇳🇴', 'Норвегия'),
-    (r'(denmark|copenhagen|\bDK\b)', '🇩🇰', 'Дания'),
-    (r'(belgium|brussels|\bBE\b)', '🇧🇪', 'Бельгия'),
-    (r'(portugal|lisbon|\bPT\b)', '🇵🇹', 'Португалия'),
-    (r'(greece|athens|\bGR\b)', '🇬🇷', 'Греция'),
-    (r'(israel|tel aviv|\bIL\b)', '🇮🇱', 'Израиль'),
-    (r'(moldova|chisinau|\bMD\b)', '🇲🇩', 'Молдова'),
-    (r'(armenia|yerevan|\bAM\b)', '🇦🇲', 'Армения'),
-    (r'(georgia|tbilisi|\bGE\b)', '🇬🇪', 'Грузия'),
-    (r'(uzbekistan|tashkent|\bUZ\b)', '🇺🇿', 'Узбекистан'),
-    (r'(vietnam|\bVN\b)', '🇻🇳', 'Вьетнам'),
-    (r'(thailand|bangkok|\bTH\b)', '🇹🇭', 'Таиланд'),
-    (r'(taiwan|\bTW\b)', '🇹🇼', 'Тайвань'),
-    (r'(russia|moscow|\bRU\b)', '🇷🇺', 'Россия')
-]
-emoji_to_name = {emoji: name for _, emoji, name in countries}
-flag_re = re.compile(r'[\U0001F1E6-\U0001F1FF]{2}')
-
-final_links = []
-xray_outbounds = []
+candidates = list(unique_endpoints.values())[:600]
+print(f"Отобрано уникальных кандидатов для реального Xray-теста: {len(candidates)}")
 
 def parse_to_xray_outbound(link, tag):
     try:
@@ -184,10 +112,112 @@ def parse_to_xray_outbound(link, tag):
     except Exception:
         return None
     return None
-
-for idx, (orig_link, base_link, host, port) in enumerate(alive_servers):
-    decoded = urllib.parse.unquote(orig_link)
+def real_xray_test(idx_item):
+    idx, (orig_link, base_link) = idx_item
+    outbound = parse_to_xray_outbound(base_link, "proxy")
+    if not outbound:
+        return None
+        
+    local_port = 20000 + idx
+    cfg = {
+        "log": {"loglevel": "none"},
+        "inbounds": [{"port": local_port, "listen": "127.0.0.1", "protocol": "http"}],
+        "outbounds": [outbound]
+    }
+    cfg_file = f"/tmp/xray_{idx}.json"
+    with open(cfg_file, "w") as f:
+        json.dump(cfg, f)
+        
+    proc = subprocess.Popen(["./xray", "run", "-c", cfg_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.4)
     
+    is_alive = False
+    try:
+        proxy_handler = urllib.request.ProxyHandler({'http': f'http://127.0.0.1:{local_port}', 'https': f'http://127.0.0.1:{local_port}'})
+        opener = urllib.request.build_opener(proxy_handler)
+        req = urllib.request.Request("http://cloudflare.com", headers={'User-Agent': 'Mozilla/5.0'})
+        with opener.open(req, timeout=4) as resp:
+            if resp.status in (200, 204):
+                is_alive = True
+    except Exception:
+        pass
+    finally:
+        proc.terminate()
+        proc.wait()
+        try:
+            import os
+            os.remove(cfg_file)
+        except Exception:
+            pass
+            
+    return (orig_link, base_link, outbound) if is_alive else None
+
+print("=== 2. Боевая проверка реального трафика через Xray (30 потоков) ===")
+alive_servers = []
+with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+    for res in executor.map(real_xray_test, enumerate(candidates)):
+        if res is not None:
+            alive_servers.append(res)
+
+print(f"Реально пропускают трафик: {len(alive_servers)} серверов")
+
+countries = [
+    (r'(netherlands|holland|\bNL\b)', '🇳🇱', 'Нидерланды'),
+    (r'(united states|america|\bUS\b|\bUSA\b)', '🇺🇸', 'США'),
+    (r'(germany|nuremberg|frankfurt|\bDE\b)', '🇩🇪', 'Германия'),
+    (r'(finland|helsinki|\bFI\b)', '🇫🇮', 'Финляндия'),
+    (r'(france|roubaix|paris|\bFR\b)', '🇫🇷', 'Франция'),
+    (r'(sweden|stockholm|\bSE\b)', '🇸🇪', 'Швеция'),
+    (r'(poland|warsaw|wroclaw|\bPL\b)', '🇵🇱', 'Польша'),
+    (r'(kazakhstan|almaty|\bKZ\b)', '🇰🇿', 'Казахстан'),
+    (r'(japan|tokyo|inzai|\bJP\b)', '🇯🇵', 'Япония'),
+    (r'(korea|seoul|\bKR\b)', '🇰🇷', 'Южная Корея'),
+    (r'(singapore|\bSG\b)', '🇸🇬', 'Сингапур'),
+    (r'(turkey|istanbul|sultanbeyli|\bTR\b)', '🇹🇷', 'Турция'),
+    (r'(hong kong|\bHK\b)', '🇭🇰', 'Гонконг'),
+    (r'(united arab|emirates|dubai|\bAE\b)', '🇦🇪', 'ОАЭ'),
+    (r'(united kingdom|london|manchester|\bUK\b|\bGB\b)', '🇬🇧', 'Великобритания'),
+    (r'(latvia|riga|\bLV\b)', '🇱🇻', 'Латвия'),
+    (r'(estonia|tallinn|\bEE\b)', '🇪🇪', 'Эстония'),
+    (r'(lithuania|vilnius|\bLT\b)', '🇱🇹', 'Литва'),
+    (r'(austria|vienna|\bAT\b)', '🇦🇹', 'Австрия'),
+    (r'(switzerland|zurich|\bCH\b)', '🇨🇭', 'Швейцария'),
+    (r'(canada|montreal|toronto|\bCA\b)', '🇨🇦', 'Канада'),
+    (r'(spain|madrid|\bES\b)', '🇪🇸', 'Испания'),
+    (r'(italy|milan|\bIT\b)', '🇮🇹', 'Италия'),
+    (r'(ukraine|kyiv|\bUA\b)', '🇺🇦', 'Украина'),
+    (r'(belarus|minsk|\bBY\b)', '🇧🇾', 'Беларусь'),
+    (r'(czechia|czech|prague|\bCZ\b)', '🇨🇿', 'Чехия'),
+    (r'(india|delhi|mumbai|\bIN\b)', '🇮🇳', 'Индия'),
+    (r'(australia|sydney|\bAU\b)', '🇦🇺', 'Австралия'),
+    (r'(brazil|sao paulo|\bBR\b)', '🇧🇷', 'Бразилия'),
+    (r'(bulgaria|sofia|\bBG\b)', '🇧🇬', 'Болгария'),
+    (r'(romania|bucharest|\bRO\b)', '🇷🇴', 'Румыния'),
+    (r'(ireland|dublin|\bIE\b)', '🇮🇪', 'Ирландия'),
+    (r'(norway|oslo|\bNO\b)', '🇳🇴', 'Норвегия'),
+    (r'(denmark|copenhagen|\bDK\b)', '🇩🇰', 'Дания'),
+    (r'(belgium|brussels|\bBE\b)', '🇧🇪', 'Бельгия'),
+    (r'(portugal|lisbon|\bPT\b)', '🇵🇹', 'Португалия'),
+    (r'(greece|athens|\bGR\b)', '🇬🇷', 'Греция'),
+    (r'(israel|tel aviv|\bIL\b)', '🇮🇱', 'Израиль'),
+    (r'(moldova|chisinau|\bMD\b)', '🇲🇩', 'Молдова'),
+    (r'(armenia|yerevan|\bAM\b)', '🇦🇲', 'Армения'),
+    (r'(georgia|tbilisi|\bGE\b)', '🇬🇪', 'Грузия'),
+    (r'(uzbekistan|tashkent|\bUZ\b)', '🇺🇿', 'Узбекистан'),
+    (r'(vietnam|\bVN\b)', '🇻🇳', 'Вьетнам'),
+    (r'(thailand|bangkok|\bTH\b)', '🇹🇭', 'Таиланд'),
+    (r'(taiwan|\bTW\b)', '🇹🇼', 'Тайвань'),
+    (r'(russia|moscow|\bRU\b)', '🇷🇺', 'Россия')
+]
+
+emoji_to_name = {emoji: name for _, emoji, name in countries}
+flag_re = re.compile(r'[\U0001F1E6-\U0001F1FF]{2}')
+
+final_links = ["#profile-title: base64:" + base64.b64encode("qwils UPDATE LTE".encode('utf-8')).decode('utf-8')]
+xray_outbounds = []
+
+for idx, (orig_link, base_link, ob) in enumerate(alive_servers):
+    decoded = urllib.parse.unquote(orig_link)
     flag_match = flag_re.search(decoded)
     flag = flag_match.group(0) if flag_match else ""
     country_ru = emoji_to_name.get(flag, "")
@@ -204,12 +234,10 @@ for idx, (orig_link, base_link, host, port) in enumerate(alive_servers):
         country_ru = "Мир"
         
     clean_base = re.sub(r'[?&](remarks|name)=.*', '', base_link)
-    final_links.append(f"{clean_base}#qwils [UPDATE] {flag} : {country_ru}")
+    final_links.append(f"{clean_base}#{flag} : {country_ru}")
     
-    if len(xray_outbounds) < 150:
-        ob = parse_to_xray_outbound(clean_base, f"node_{idx}")
-        if ob:
-            xray_outbounds.append(ob)
+    ob["tag"] = f"node_{idx}"
+    xray_outbounds.append(ob)
 
 payload = "\n".join(final_links)
 b64_payload = base64.b64encode(payload.encode('utf-8')).decode('utf-8')
@@ -219,7 +247,6 @@ with open("subscription.txt", "w", encoding="utf-8") as f:
 def build_xray_json(remarks, nodes, use_white_lists=False):
     tags = [n["tag"] for n in nodes]
     routing_rules = []
-    
     if use_white_lists:
         ru_domains = [
             "regexp:.*\\.ru$", "regexp:.*\\.рф$", "regexp:.*\\.su$",
@@ -227,40 +254,12 @@ def build_xray_json(remarks, nodes, use_white_lists=False):
             "domain:gosuslugi.ru", "domain:sberbank.ru", "domain:tbank.ru", "domain:vtb.ru",
             "domain:alfabank.ru", "domain:ozon.ru", "domain:wildberries.ru", "domain:avito.ru",
             "domain:kinopoisk.ru", "domain:yandex.net", "domain:ya.ru", "domain:vk.com",
-            "domain:ok.ru", "domain:dzen.ru", "domain:rutube.ru", "domain:mos.ru",
-            "domain:nalog.gov.ru", "domain:pochta.ru", "domain:rzd.ru", "domain:aeroflot.ru",
-            "domain:dns-shop.ru", "domain:citilink.ru", "domain:mvideo.ru", "domain:magnit.ru",
-            "domain:x5.ru", "domain:lenta.com", "domain:hh.ru", "domain:habr.com",
-            "domain:pikabu.ru", "domain:2gis.ru", "domain:gismeteo.ru", "domain:rbc.ru",
-            "domain:ria.ru", "domain:tass.ru", "domain:lenta.ru", "domain:gazeta.ru",
-            "domain:kommersant.ru", "domain:kp.ru", "domain:iz.ru", "domain:rt.com",
-            "domain:1tv.ru", "domain:ntv.ru", "domain:matchtv.ru", "domain:ivi.ru",
-            "domain:okko.tv", "domain:wink.ru", "domain:kion.ru", "domain:start.ru",
-            "domain:premier.one", "domain:more.tv", "domain:smotrim.ru", "domain:livejournal.com",
-            "domain:stepik.org", "domain:uchi.ru", "domain:resh.edu.ru", "domain:sber.ru",
-            "domain:tinkoff.ru", "domain:raiffeisen.ru", "domain:gazprombank.ru", "domain:psbank.ru",
-            "domain:sovcombank.ru", "domain:open.ru", "domain:pochtabank.ru", "domain:mts.ru",
-            "domain:megafon.ru", "domain:beeline.ru", "domain:tele2.ru", "domain:yota.ru",
-            "domain:rostelecom.ru", "domain:dom.ru", "domain:mgts.ru", "domain:reg.ru",
-            "domain:nic.ru", "domain:timeweb.com", "domain:selectel.ru", "domain:vkvideo.ru",
-            "domain:yandex.com", "domain:yastatic.net", "domain:userapi.com", "domain:vk-portal.net"
+            "domain:ok.ru", "domain:dzen.ru", "domain:rutube.ru", "domain:mos.ru"
         ]
-        routing_rules.append({
-            "type": "field",
-            "domain": ru_domains,
-            "outboundTag": "direct"
-        })
-        routing_rules.append({
-            "type": "field",
-            "ip": ["geoip:ru", "geoip:private"],
-            "outboundTag": "direct"
-        })
+        routing_rules.append({"type": "field", "domain": ru_domains, "outboundTag": "direct"})
+        routing_rules.append({"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"})
 
-    routing_rules.append({
-        "type": "field",
-        "network": "tcp,udp",
-        "balancerTag": "auto_fastest"
-    })
+    routing_rules.append({"type": "field", "network": "tcp,udp", "balancerTag": "auto_fastest"})
 
     config = {
         "remarks": remarks,
@@ -269,24 +268,11 @@ def build_xray_json(remarks, nodes, use_white_lists=False):
             {"tag": "socks", "port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}},
             {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http"}
         ],
-        "outbounds": nodes + [
-            {"tag": "direct", "protocol": "freedom"},
-            {"tag": "block", "protocol": "blackhole"}
-        ],
-        "observatory": {
-            "subjectSelector": tags,
-            "probeURL": "http://cloudflare.com",
-            "probeInterval": "30s"
-        },
+        "outbounds": nodes + [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}],
+        "observatory": {"subjectSelector": tags, "probeURL": "http://cloudflare.com", "probeInterval": "30s"},
         "routing": {
             "domainStrategy": "IPIfNonMatch",
-            "balancers": [
-                {
-                    "tag": "auto_fastest",
-                    "selector": tags,
-                    "strategy": {"type": "leastPing"}
-                }
-            ],
+            "balancers": [{"tag": "auto_fastest", "selector": tags, "strategy": {"type": "leastPing"}}],
             "rules": routing_rules
         }
     }
@@ -298,11 +284,11 @@ if xray_outbounds:
 
     chunk_size = 10
     for idx in range(5):
-        chunk = xray_outbounds[idx * chunk_size : (idx + 1) * chunk_size]
-        if not chunk:
-            chunk = xray_outbounds[:chunk_size]
+        chunk = xray_outbounds[idx * chunk_size : (idx + 1) * chunk_size] or xray_outbounds[:chunk_size]
         with open(f"auto_bs_{idx + 1}.json", "w", encoding="utf-8") as f:
             f.write(build_xray_json(f"Авто БС #{idx + 1}", chunk, use_white_lists=True))
 
-print("=== Готово! Все подписки и JSON-балансировщики успешно созданы ===")
+print("=== Все готово! ===")
 EOF
+rm -f xray
+
