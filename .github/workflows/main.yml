@@ -22,3 +22,6 @@ jobs:
           git add subscription.txt
           git commit -m "Automated update: Checked and cleaned VPN nodes" || exit 0
           git push
+          git add subscription.txt *.json
+          git commit -m "Automated update" || exit 0
+          git push
