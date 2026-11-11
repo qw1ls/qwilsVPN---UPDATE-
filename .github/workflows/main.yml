@@ -18,10 +18,7 @@ jobs:
       - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
-          git add subscription.txt
-          git commit -m "Automated update: Checked and cleaned VPN nodes" || exit 0
-          git push
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add subscription.txt *.json
-          git commit -m "Automated update" || exit 0
+          git commit -m "Automated update: Checked VPN nodes and JSON balancers" || exit 0
           git push
