@@ -1,0 +1,418 @@
+{
+  "remarks": "Авто БС #5",
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    },
+    {
+      "tag": "http",
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "node_83",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.24.140.39",
+            "port": 80,
+            "users": [
+              {
+                "id": "592bac53-90ec-44b5-811b-01f6adf28f41",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "wild-glade-236b-ppal03.xawego3471.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_84",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.18.12.149",
+            "port": 80,
+            "users": [
+              {
+                "id": "5f4845b4-11dc-41d6-9508-4ff6a02e36c1",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/@ProxyVPN11",
+          "headers": {
+            "Host": "silent-paper-fa57.fipiyag989.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_85",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.129.164.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560&https://t.me/WangCai2🇨🇳",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_86",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.129.166.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_87",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.234.239.201",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560",
+          "headers": {
+            "Host": "www.udemy.com.joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_88",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.238.70.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560&https://t.me/WangCai2🇨🇳",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_89",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.238.71.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_90",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.254.140.30",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "vms.lifetime54.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_91",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "14.102.228.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560&https://t.me/WangCai2🇨🇳",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_92",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "141.11.202.253",
+            "port": 8880,
+            "users": [
+              {
+                "id": "6202b230-417c-4d8e-b624-0f71afa9c75d",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Free-VPN-CF-Geo-Project/HK?ed=2560",
+          "headers": {
+            "Host": "joss.jak.biz.id"
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "observatory": {
+    "subjectSelector": [
+      "node_83",
+      "node_84",
+      "node_85",
+      "node_86",
+      "node_87",
+      "node_88",
+      "node_89",
+      "node_90",
+      "node_91",
+      "node_92"
+    ],
+    "probeURL": "http://cloudflare.com",
+    "probeInterval": "30s"
+  },
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      {
+        "tag": "auto",
+        "selector": [
+          "node_83",
+          "node_84",
+          "node_85",
+          "node_86",
+          "node_87",
+          "node_88",
+          "node_89",
+          "node_90",
+          "node_91",
+          "node_92"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        }
+      }
+    ],
+    "rules": [
+      {
+        "type": "field",
+        "domain": [
+          "regexp:.*\\.ru$",
+          "regexp:.*\\.рф$",
+          "regexp:.*\\.su$",
+          "geosite:category-ru",
+          "geosite:yandex",
+          "geosite:vk",
+          "geosite:mailru",
+          "domain:gosuslugi.ru",
+          "domain:sberbank.ru",
+          "domain:tbank.ru",
+          "domain:vtb.ru",
+          "domain:alfabank.ru",
+          "domain:ozon.ru",
+          "domain:wildberries.ru",
+          "domain:avito.ru",
+          "domain:kinopoisk.ru",
+          "domain:vk.com",
+          "domain:ya.ru",
+          "domain:rutube.ru",
+          "domain:dzen.ru",
+          "domain:mos.ru",
+          "domain:nalog.gov.ru",
+          "domain:pochta.ru",
+          "domain:rzd.ru",
+          "domain:dns-shop.ru",
+          "domain:citilink.ru",
+          "domain:mvideo.ru",
+          "domain:hh.ru",
+          "domain:habr.com",
+          "domain:pikabu.ru",
+          "domain:2gis.ru",
+          "domain:ivi.ru",
+          "domain:okko.tv",
+          "domain:wink.ru",
+          "domain:kion.ru"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "geoip:ru",
+          "geoip:private"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "balancerTag": "auto"
+      }
+    ]
+  }
+}

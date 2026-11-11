@@ -1,0 +1,418 @@
+{
+  "remarks": "Авто БС #2",
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    },
+    {
+      "tag": "http",
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "node_53",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.132.136",
+            "port": 80,
+            "users": [
+              {
+                "id": "0cca1132-94a6-476c-ab13-6b28e0727751",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "blue-pine-59a0-ppal03.haleyaw148.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_54",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.24.192.51",
+            "port": 80,
+            "users": [
+              {
+                "id": "0cca1132-94a6-476c-ab13-6b28e0727751",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "blue-pine-59a0-ppal03.haleyaw148.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_55",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.21.16.1",
+            "port": 80,
+            "users": [
+              {
+                "id": "1737df47-a4b2-4096-9fc3-1d869aa50c08",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/Lf40Du14nxmNjCFx?ed=2560",
+          "headers": {
+            "Host": "cxrolvpn.freev2-edb.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_56",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.19.242",
+            "port": 80,
+            "users": [
+              {
+                "id": "1853d1d2-1ccf-48e6-ae05-0c0bb285a8c4",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "winter-bush-f08c-ppal03.himigaw787.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_57",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "172.67.209.127",
+            "port": 8880,
+            "users": [
+              {
+                "id": "1b3ad465-d37e-48a2-bb53-d7fddfc97b11",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "calm-silence-d4a1.217.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_58",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.17.72.206",
+            "port": 80,
+            "users": [
+              {
+                "id": "1de37726-744b-46e1-9101-c926b3402e82",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "v2.v2configlab.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_59",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.209.187",
+            "port": 80,
+            "users": [
+              {
+                "id": "20cf8a2b-e301-4240-9c03-20883249a287",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "divine-hall-8adb-ppal03.niyabi6636.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_60",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.24.198.111",
+            "port": 80,
+            "users": [
+              {
+                "id": "20cf8a2b-e301-4240-9c03-20883249a287",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/?ed=2560",
+          "headers": {
+            "Host": "divine-hall-8adb-ppal03.niyabi6636.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_61",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.16.98.215",
+            "port": 8880,
+            "users": [
+              {
+                "id": "23187ddc-16a5-432d-bf4e-dd42a7ae39f7",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "steep-thunder-97fa.108-d10.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "node_62",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.27.2.172",
+            "port": 80,
+            "users": [
+              {
+                "id": "234c52f2-0d7b-dc4a-0d6b-b0b300000025",
+                "encryption": "none",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/sync",
+          "headers": {
+            "Host": "billowing-surf-d251.netizo06.workers.dev"
+          }
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "observatory": {
+    "subjectSelector": [
+      "node_53",
+      "node_54",
+      "node_55",
+      "node_56",
+      "node_57",
+      "node_58",
+      "node_59",
+      "node_60",
+      "node_61",
+      "node_62"
+    ],
+    "probeURL": "http://cloudflare.com",
+    "probeInterval": "30s"
+  },
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "balancers": [
+      {
+        "tag": "auto",
+        "selector": [
+          "node_53",
+          "node_54",
+          "node_55",
+          "node_56",
+          "node_57",
+          "node_58",
+          "node_59",
+          "node_60",
+          "node_61",
+          "node_62"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        }
+      }
+    ],
+    "rules": [
+      {
+        "type": "field",
+        "domain": [
+          "regexp:.*\\.ru$",
+          "regexp:.*\\.рф$",
+          "regexp:.*\\.su$",
+          "geosite:category-ru",
+          "geosite:yandex",
+          "geosite:vk",
+          "geosite:mailru",
+          "domain:gosuslugi.ru",
+          "domain:sberbank.ru",
+          "domain:tbank.ru",
+          "domain:vtb.ru",
+          "domain:alfabank.ru",
+          "domain:ozon.ru",
+          "domain:wildberries.ru",
+          "domain:avito.ru",
+          "domain:kinopoisk.ru",
+          "domain:vk.com",
+          "domain:ya.ru",
+          "domain:rutube.ru",
+          "domain:dzen.ru",
+          "domain:mos.ru",
+          "domain:nalog.gov.ru",
+          "domain:pochta.ru",
+          "domain:rzd.ru",
+          "domain:dns-shop.ru",
+          "domain:citilink.ru",
+          "domain:mvideo.ru",
+          "domain:hh.ru",
+          "domain:habr.com",
+          "domain:pikabu.ru",
+          "domain:2gis.ru",
+          "domain:ivi.ru",
+          "domain:okko.tv",
+          "domain:wink.ru",
+          "domain:kion.ru"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "geoip:ru",
+          "geoip:private"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "balancerTag": "auto"
+      }
+    ]
+  }
+}
