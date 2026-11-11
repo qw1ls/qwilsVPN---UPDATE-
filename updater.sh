@@ -1,101 +1,104 @@
 #!/bin/bash
 
-# Создаем чистые рабочие файлы
-> raw_configs.txt
-> clean_configs.txt
-> filtered_configs.txt
+python3 - << 'EOF'
+import urllib.request
+import urllib.parse
+import re
+import base64
+import concurrent.futures
 
-echo "=== Сбор источников с обходом блокировок Гитхаба ==="
+# Маскировка ссылок пробелами
+raw_urls = [
+    "https:// raw . githubusercontent . com / 0xRadikal / Free-v2ray-Configs / refs / heads / main / all / configs . txt",
+    "https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / BLACK_SS%2BAll_RUS . txt",
+    "https:// fastly . jsdelivr . net / gh / whoahaow / rjsxrd@main / githubmirror / bypass / bypass-all . txt",
+    "https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / BLACK_VLESS_RUS . txt",
+    "https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / Vless-Reality-White-Lists-Rus-Mobile . txt"
+]
 
-# Записываем все ваши 5 источников (маскировка пробелами)
-url1="https:// raw . githubusercontent . com / 0xRadikal / Free-v2ray-Configs / refs / heads / main / all / configs . txt"
-url2="https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / BLACK_SS%2BAll_RUS . txt"
-url3="https:// fastly . jsdelivr . net / gh / whoahaow / rjsxrd@main / githubmirror / bypass / bypass-all . txt"
-url4="https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / BLACK_VLESS_RUS . txt"
-url5="https:// raw . githubusercontent . com / igareck / vpn-configs-for-russia / refs / heads / main / Vless-Reality-White-Lists-Rus-Mobile . txt"
+for i in range(1, 26):
+    raw_urls.append(f"https:// raw . githubusercontent . com / hiztin / VLESS-PO-GRIBI / main / deploy / subscriptions / {i} . txt")
 
-# Удаляем пробелы и скачиваем
-clean_url1=$(echo "$url1" | sed 's/ //g')
-clean_url2=$(echo "$url2" | sed 's/ //g')
-clean_url3=$(echo "$url3" | sed 's/ //g')
-clean_url4=$(echo "$url4" | sed 's/ //g')
-clean_url5=$(echo "$url5" | sed 's/ //g')
+urls = [u.replace(" ", "") for u in raw_urls]
 
-curl -sL --connect-timeout 5 "$clean_url1" >> raw_configs.txt
-curl -sL --connect-timeout 5 "$clean_url2" >> raw_configs.txt
-curl -sL --connect-timeout 5 "$clean_url3" >> raw_configs.txt
-curl -sL --connect-timeout 5 "$clean_url4" >> raw_configs.txt
-curl -sL --connect-timeout 5 "$clean_url5" >> raw_configs.txt
+def fetch_url(url):
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.read().decode('utf-8', errors='ignore')
+    except Exception:
+        return ""
 
-# Цикл по грибам от 1 до 25
-for i in {1..25}; do
-    grib_url="https:// raw . githubusercontent . com / hiztin / VLESS-PO-GRIBI / main / deploy / subscriptions / ${i} . txt"
-    clean_grib_url=$(echo "$grib_url" | sed 's/ //g')
-    curl -sL --connect-timeout 3 "$clean_grib_url" >> raw_configs.txt
-done
+print("=== Параллельное скачивание всех 30 источников ===")
+with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    texts = list(executor.map(fetch_url, urls))
 
-# ТОТАЛЬНЫЙ СРЕЗ: Вырезаем только выносливые vless, ss и trojan
-grep -oE '(vless|ss|trojan)://[^"& ]+' raw_configs.txt | sort -u > clean_configs.txt
-total_servers=$(wc -l < clean_configs.txt)
-echo "Успешно скачано потенциальных нод: $total_servers"
+raw_data = "\n".join(texts)
 
-echo "=== Старт УЛЬТРА-БЫСТРОЙ TCP-проверки и расстановки флагов ==="
-export -f echo
+# Вытаскиваем только vless, ss и trojan (без hysteria и vmess)
+links = set(re.findall(r'(?:vless|ss|trojan)://[^\s"\'<>]+', raw_data))
+print(f"Найдено уникальных ссылок: {len(links)}")
 
-# Функция проверки отдельной строки (работает внутри xargs)
-check_line() {
-    local line="$1"
-    local server_host=$(echo "$line" | grep -oE '@[^:]+' | tr -d '@' | head -n 1)
-    local server_port=$(echo "$line" | grep -oE ':[0-9]+' | tr -d ':' | head -n 1)
+country_map = [
+    (r'(netherlands|holland|\bNL\b)', '🇳🇱'),
+    (r'(united states|america|\bUS\b|\bUSA\b)', '🇺🇸'),
+    (r'(germany|nuremberg|frankfurt|\bDE\b)', '🇩🇪'),
+    (r'(finland|helsinki|\bFI\b)', '🇫🇮'),
+    (r'(france|roubaix|\bFR\b)', '🇫🇷'),
+    (r'(sweden|\bSE\b)', '🇸🇪'),
+    (r'(poland|warsaw|wroclaw|\bPL\b)', '🇵🇱'),
+    (r'(kazakhstan|\bKZ\b)', '🇰🇿'),
+    (r'(japan|inzai|\bJP\b)', '🇯🇵'),
+    (r'(korea|\bKR\b)', '🇰🇷'),
+    (r'(singapore|\bSG\b)', '🇸🇬'),
+    (r'(turkey|sultanbeyli|\bTR\b)', '🇹🇷'),
+    (r'(hong kong|\bHK\b)', '🇭🇰'),
+    (r'(united arab|emirates|\bAE\b)', '🇦🇪'),
+    (r'(united kingdom|london|manchester|\bUK\b|\bGB\b)', '🇬🇧'),
+    (r'(latvia|\bLV\b)', '🇱🇻'),
+    (r'(estonia|\bEE\b)', '🇪🇪'),
+    (r'(lithuania|\bLT\b)', '🇱🇹'),
+    (r'(austria|\bAT\b)', '🇦🇹'),
+    (r'(switzerland|\bCH\b)', '🇨🇭'),
+    (r'(canada|montreal|\bCA\b)', '🇨🇦'),
+    (r'(spain|\bES\b)', '🇪🇸'),
+    (r'(italy|\bIT\b)', '🇮🇹'),
+    (r'(ukraine|\bUA\b)', '🇺🇦'),
+    (r'(belarus|\bBY\b)', '🇧🇾'),
+    (r'(czechia|czech|\bCZ\b)', '🇨🇿'),
+    (r'(india|delhi|\bIN\b)', '🇮🇳')
+]
+
+flag_re = re.compile(r'[\U0001F1E6-\U0001F1FF]{2}')
+final_links = []
+
+for link in sorted(links):
+    decoded = urllib.parse.unquote(link)
     
-    if [ ! -z "$server_host" ] && [ ! -z "$server_port" ]; then
-        # Ставим жесткий таймаут 1 секунду: если сервер живой, он ответит мгновенно
-        if curl -s --connect-timeout 1 "telnet://${server_host}:${server_port}" > /dev/null 2>&1 || \
-           curl -s --connect-timeout 1 "https://${server_host}:${server_port}" > /dev/null 2>&1; then
-            
-            # Быстро декодируем URL-символы флагов
-            local decoded=$(echo -e "${line//%/\\x}")
-            local flag=$(echo "$decoded" | grep -oP '[\x{1F1E6}-\x{1F1FF}]{2}' 2>/dev/null | head -n 1)
+    # Ищем флаг-смайлик в декодированной строке
+    flag_match = flag_re.search(decoded)
+    flag = flag_match.group(0) if flag_match else ""
+    
+    if not flag:
+        for pattern, emoji in country_map:
+            if re.search(pattern, decoded, re.IGNORECASE):
+                flag = emoji
+                break
+    if not flag:
+        flag = "🌐"
+        
+    # Полностью срезаем старое имя
+    base_link = link.split('#')[0]
+    base_link = re.sub(r'%23.*', '', base_link)
+    base_link = re.sub(r'[?&](remarks|name)=.*', '', base_link)
+    
+    final_links.append(f"{base_link}#qwils [UPDATE] {flag}")
 
-            if [ -z "$flag" ]; then
-                if echo "$decoded" | grep -riqE '(netherlands|holland|\bNL\b)'; then flag="🇳🇱"
-                elif echo "$decoded" | grep -riqE '(united states|america|\bUS\b|\bUSA\b)'; then flag="🇺🇸"
-                elif echo "$decoded" | grep -riqE '(germany|nuremberg|\bDE\b)'; then flag="🇩🇪"
-                elif echo "$decoded" | grep -riqE '(finland|\bFI\b)'; then flag="🇫🇮"
-                elif echo "$decoded" | grep -riqE '(france|roubaix|\bFR\b)'; then flag="🇫🇷"
-                elif echo "$decoded" | grep -riqE '(poland|warsaw|\bPL\b)'; then flag="🇵🇱"
-                elif echo "$decoded" | grep -riqE '(kazakhstan|\bKZ\b)'; then flag="🇰🇿"
-                elif echo "$decoded" | grep -riqE '(japan|\bJP\b)'; then flag="🇯🇵"
-                elif echo "$decoded" | grep -riqE '(united kingdom|london|\bUK\b)'; then flag="🇬🇧"
-                elif echo "$decoded" | grep -riqE '(spain|\bES\b)'; then flag="🇪🇸"
-                elif echo "$decoded" | grep -riqE '(italy|\bIT\b)'; then flag="🇮🇹"
-                else flag="🌐"
-                fi
-            fi
+payload = "\n".join(final_links)
+b64_payload = base64.b64encode(payload.encode('utf-8')).decode('utf-8')
 
-            # Чистим итоговую строку от мусора
-            local clean_line=$(echo "$line" | cut -d'#' -f1 | sed 's/%23.*//' | sed 's/[?&]remarks=.*//' | sed 's/[?&]name=.*//')
-            echo "${clean_line}#qwils [UPDATE] ${flag}" >> filtered_configs.txt
-        fi
-    fi
-}
-export -f check_line
+with open("subscription.txt", "w", encoding="utf-8") as f:
+    f.write(b64_payload)
 
-# Запускаем бешеную параллельную обработку в 150 потоков через xargs
-xargs -P 150 -I {} bash -c 'check_line "{}"' < clean_configs.txt
-
-# Страховочный список
-if [ ! -s filtered_configs.txt ]; then
-    while read -r line; do
-        clean_line=$(echo "$line" | cut -d'#' -f1 | sed 's/%23.*//' | sed 's/[?&]remarks=.*//' | sed 's/[?&]name=.*//')
-        echo "${clean_line}#qwils [UPDATE] 🌐" >> filtered_configs.txt
-    done < clean_configs.txt
-fi
-
-# Упаковываем результат в Base64 для Happ
-base64 -w 0 filtered_configs.txt > subscription.txt
-
-# Полная очистка мусора
-rm -f raw_configs.txt clean_configs.txt filtered_configs.txt
-echo "=== Все проверки успешно завершены! ==="
-
+print(f"=== Готово! Упаковано {len(final_links)} серверов ===")
+EOF
