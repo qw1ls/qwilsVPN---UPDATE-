@@ -12,8 +12,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Run updater script
-        run: bash updater.sh
+        run: python3 updater.sh
 
       - name: Commit and Push changes
         run: |
@@ -22,6 +27,3 @@ jobs:
           git add subscription.txt *.json
           git commit -m "Automated update: Checked VPN nodes and JSON balancers" || exit 0
           git push
-- name: Run Updater
-  run: |
-    python3 updater.sh
