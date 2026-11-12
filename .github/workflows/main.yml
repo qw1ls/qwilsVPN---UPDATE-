@@ -22,3 +22,6 @@ jobs:
           git add subscription.txt *.json
           git commit -m "Automated update: Checked VPN nodes and JSON balancers" || exit 0
           git push
+- name: Run Updater
+  run: |
+    python3 updater.sh
