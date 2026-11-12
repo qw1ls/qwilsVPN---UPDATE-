@@ -16,7 +16,6 @@ SOURCES = [
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
 ]
 
-# Добавляем 25 ссылок от hiztin
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
@@ -57,7 +56,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -70,15 +69,14 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Усиленная глубокая проверка сокета и TLS/Reality рукопожатия с увеличенным таймаутом (7 секунд)
 def check_node(node):
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # Строгий таймаут 7.0 секунд для тщательной проверки отклика
-        with socket.create_connection((node["address"], node["port"]), timeout=7.0) as sock:
+        # Оптимальный и надежный таймаут 3.5 секунды (не вешает пайплайн, но отсекает мертвые)
+        with socket.create_connection((node["address"], node["port"]), timeout=3.5) as sock:
             with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                 pass
             return True
@@ -86,11 +84,13 @@ def check_node(node):
         return False
 
 def main():
-    print("Загрузка ссылок из всех источников...")
+    print("Загрузка ссылок из источников...")
     raw_links = fetch_sources()
-    print(f"Найдено уникальных сырых ссылок: {len(raw_links)}")
+    print(f"Найдено сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
+    seen_endpoints = set() # Защита от дубликатов серверов
+    
     for link in raw_links:
         try:
             parsed = urlparse(link)
@@ -100,9 +100,13 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
-            # Строгая фильтрация: исключительно tls или reality
             if security not in ["tls", "reality"]:
                 continue
+                
+            endpoint = f"{parsed.hostname}:{parsed.port}"
+            if endpoint in seen_endpoints:
+                continue # Пропускаем дубликаты одинаковых хостов/портов
+            seen_endpoints.add(endpoint)
                 
             name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
             country_code = "OTHER"
@@ -116,7 +120,6 @@ def main():
             else:
                 flag, c_name = "🌐", "Другие"
             
-            # Название без двоеточия: Флаг + Полное название страны
             clean_name = f"{flag} {c_name}"
 
             node = {
@@ -151,8 +154,8 @@ def main():
         except Exception:
             continue
 
-    print(f"Прошли фильтрацию безопасности (TLS/Reality): {len(parsed_nodes)}")
-    print("Запуск УСИЛЕННОЙ проверки работоспособности (таймаут 7с, 100 потоков)...")
+    print(f"Уникальных нод после фильтрации TLS/Reality: {len(parsed_nodes)}")
+    print("Запуск проверки работоспособности (100 потоков)...")
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=100) as executor:
@@ -165,7 +168,7 @@ def main():
             except Exception:
                 pass
 
-    print(f"Отобрано железобетонно живых нод: {len(valid_nodes)}")
+    print(f"Прошло проверку живых нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -252,7 +255,6 @@ def main():
             ]
         }
 
-    # 2. Генерация auto_eu.json
     eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["Германия", "Нидерланды", "Франция", "Финляндия", "Швеция", "Польша"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
@@ -260,7 +262,6 @@ def main():
     with open("auto_eu.json", "w", encoding="utf-8") as f:
         json.dump(make_balancer(eu_nodes), f, indent=2, ensure_ascii=False)
         
-    # 3. Генерация auto_bs_1..5.json
     chunk_size = max(1, len(valid_nodes) // 5)
     for i in range(1, 6):
         chunk = valid_nodes[(i-1)*chunk_size : i*chunk_size]
@@ -269,7 +270,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Генерация завершена. Все файлы обновлены.")
+    print("Все файлы сгенерированы успешно.")
 
 if __name__ == "__main__":
     main()
