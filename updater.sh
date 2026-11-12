@@ -57,7 +57,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -70,33 +70,26 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# УЛЬТРА-УСИЛЕННАЯ ПРОВЕРКА: Двойной хендшейк (стресс-тест)
-def check_node_deep(node):
-    latencies = []
+# Быстрая и жесткая проверка с жестким таймаутом 2.0с для отсечения барахтающихся серверов
+def check_node(node):
+    start_time = time.time()
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # Делаем ДВА последовательных подключения для гарантии стабильности
-        for _ in range(2):
-            start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
-                with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
-                    pass
-            latencies.append(time.time() - start_time)
-            # Небольшая пауза между тестами для проверки отклика под нагрузкой
-            time.sleep(0.1)
-            
-        avg_latency = sum(latencies) / len(latencies)
-        return True, avg_latency
+        with socket.create_connection((node["address"], node["port"]), timeout=2.0) as sock:
+            with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
+                pass
+        latency = time.time() - start_time
+        return True, latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка сырых ссылок из всех источников...")
+    print("Загрузка сырых ссылок...")
     raw_links = fetch_sources()
-    print(f"Найдено уникальных ссылок: {len(raw_links)}")
+    print(f"Найдено ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -110,7 +103,6 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
-            # Жесткая фильтрация безопасности
             if security not in ["tls", "reality"]:
                 continue
                 
@@ -154,7 +146,7 @@ def main():
                 node["path"] = query.get("path", ["/"])[0]
                 node["host"] = query.get("host", [""])[0]
             elif net == "grpc":
-                node["serviceName"] = query.get("serviceName", [""])[0]
+                node["serviceName"] = query.get("serviceName", "")
             elif net == "xhttp":
                 node["path"] = query.get("path", ["/"])[0]
             
@@ -165,13 +157,13 @@ def main():
         except Exception:
             continue
 
-    print(f"Прошли фильтрацию TLS/Reality: {len(parsed_nodes)}")
-    print("🚀 Запуск МАКСИМАЛЬНО УСИЛЕННОГО стресс-теста (двойной хендшейк, 50 потоков)...")
+    print(f"Уникальных нод после фильтрации TLS/Reality: {len(parsed_nodes)}")
+    print("Запуск оптимизированного стресс-теста (150 потоков)...")
     
     valid_nodes = []
-    # Снижаем число потоков до 50, чтобы качественнее нагружать сеть и точно замерять отклик
-    with ThreadPoolExecutor(max_workers=50) as executor:
-        futures = {executor.submit(check_node_deep, node): node for node in parsed_nodes}
+    # Увеличиваем число потоков до 150, чтобы опрос шел мгновенно
+    with ThreadPoolExecutor(max_workers=150) as executor:
+        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -182,10 +174,8 @@ def main():
             except Exception:
                 pass
 
-    # Сортировка по реальной скорости отклика (самые быстрые и стабильные сверху)
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-
-    print(f"✨ Прошли железобетонный двойной стресс-тест: {len(valid_nodes)}")
+    print(f"Прошло проверку живых нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -195,7 +185,6 @@ def main():
             "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
-    # 1. Генерация subscription.txt
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
@@ -288,7 +277,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Все файлы успешно обновлены по итогам глубокого стресс-теста.")
+    print("Все файлы успешно обновлены.")
 
 if __name__ == "__main__":
     main()
