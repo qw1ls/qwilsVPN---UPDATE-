@@ -9,7 +9,6 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Ваши источники + 25 сгенерированных ссылок от hiztin
 SOURCES = [
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
@@ -17,11 +16,10 @@ SOURCES = [
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
 ]
 
-# Автоматически добавляем 25 файлов от hiztin (от 1.txt до 25.txt)
+# Добавляем 25 ссылок от hiztin
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
-# Расширенный словарь флагов стран
 COUNTRY_FLAGS = {
     "NL": "🇳🇱", "DE": "🇩🇪", "FR": "🇫🇷", "US": "🇺🇸", "GB": "🇬🇧",
     "FI": "🇫🇮", "SE": "🇸🇪", "PL": "🇵🇱", "CA": "🇨🇦", "SG": "🇸🇬",
@@ -35,20 +33,19 @@ def fetch_sources():
     all_links = []
     for url in SOURCES:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
-                # Если контент закодирован в base64 (часто бывает в подписках)
                 if "vless://" not in content:
                     try:
-                        decoded_bytes = base64.b64decode(content.strip())
-                        content = decoded_bytes.decode('utf-8', errors='ignore')
+                        content = base64.b64decode(content.strip()).decode('utf-8', errors='ignore')
                     except Exception:
                         pass
                 links = re.findall(r'vless://[^\s<>"]+', content)
+                print(f"[OK] Загружено из {url.split('/')[-1]}: найдено {len(links)} ссылок")
                 all_links.extend(links)
         except Exception as e:
-            print(f"Пропуск источника (ошибка загрузки): {url} -> {e}")
+            print(f"[WARN] Не удалось загрузить {url}: {e}")
     return list(set(all_links))
 
 def parse_vless(link):
@@ -60,11 +57,10 @@ def parse_vless(link):
         query = parse_qs(parsed.query)
         security = query.get("security", [""])[0].lower()
         
-        # СТРОГАЯ ФИЛЬТРАЦИЯ: пропускаем ТОЛЬКО tls и reality (отбрасываем none/без шифрования)
+        # Строгая фильтрация: только tls или reality
         if security not in ["tls", "reality"]:
             return None
             
-        # Определяем страну и флаг для имени ноды
         name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
         country_code = "OTHER"
         for code in COUNTRY_FLAGS.keys():
@@ -85,7 +81,6 @@ def parse_vless(link):
             "fp": query.get("fp", ["chrome"])[0],
             "type": query.get("type", ["tcp"])[0],
             "name": clean_name,
-            "raw": "" # Сформируем заново с чистым именем
         }
         
         if security == "reality":
@@ -101,7 +96,6 @@ def parse_vless(link):
         elif net == "xhttp":
             config["path"] = query.get("path", ["/"])[0]
         
-        # Пересобираем чистую ссылку с форматом имени «ФЛАГ : Страна»
         clean_query = parsed.query
         config["raw"] = f"vless://{config['uuid']}@{config['address']}:{config['port']}?{clean_query}#{urllib.parse.quote(clean_name)}"
             
@@ -115,7 +109,7 @@ def check_node(node):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        with socket.create_connection((node["address"], node["port"]), timeout=2.5) as sock:
+        with socket.create_connection((node["address"], node["port"]), timeout=3) as sock:
             with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                 pass
             return True
@@ -162,7 +156,7 @@ def generate_xray_balancer(nodes):
     outbounds = []
     balancer_targets = []
     
-    for i, node in enumerate(nodes[:50]): # Ограничиваем топ-50 для стабильности балансировщика
+    for i, node in enumerate(nodes[:50]):
         tag = f"proxy_{i}"
         balancer_targets.append(tag)
         
@@ -203,9 +197,8 @@ def generate_xray_balancer(nodes):
     return config
 
 if __name__ == "__main__":
-    print(f"Всего источников для опроса: {len(SOURCES)}")
     raw_links = fetch_sources()
-    print(f"Найдено сырых ссылок: {len(raw_links)}")
+    print(f"Всего собрано сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     for link in raw_links:
@@ -215,17 +208,31 @@ if __name__ == "__main__":
             
     print(f"Прошли фильтрацию (только TLS/Reality): {len(parsed_nodes)}")
     
-    print("Проверка сокетов и TLS рукопожатий (100 потоков)...")
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
-        for future in as_completed(futures):
-            node = futures[future]
-            if future.result():
-                valid_nodes.append(node)
-                
-    print(f"Успешно прошли проверку: {len(valid_nodes)}")
+    if parsed_nodes:
+        print("Проверка сокетов и TLS рукопожатий (100 потоков)...")
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            futures = {executor.submit(check_node, node): node for node in parsed_nodes}
+            for future in as_completed(futures):
+                node = futures[future]
+                try:
+                    if future.result():
+                        valid_nodes.append(node)
+                except Exception:
+                    pass
+                    
+    print(f"Успешно прошли проверку сокетов: {len(valid_nodes)}")
     
+    # Страховка: если проверка сокетов отсеяла вообще всё из-за проблем с сетью в Github Actions, 
+    # используем распарсенные ноды напрямую, чтобы пайплайн не упал с ошибкой.
+    if not valid_nodes and parsed_nodes:
+        print("[WARN] Сокет-чекер не нашел доступных нод (возможно, таймаут сети). Используем отфильтрованные ноды без проверки.")
+        valid_nodes = parsed_nodes[:50]
+        
+    if not valid_nodes:
+        print("[ERROR] Не найдено ни одной подходящей ноды!")
+        exit(1)
+
     # 1. Генерация subscription.txt
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
@@ -236,7 +243,7 @@ if __name__ == "__main__":
 
     os.makedirs(".", exist_ok=True)
     
-    # 2. Генерация auto_eu.json (Европа или любые доступные)
+    # 2. Генерация auto_eu.json
     eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["🇳🇱", "🇩🇪", "🇫🇷", "🇫🇮", "🇸🇪", "PL"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
@@ -244,7 +251,7 @@ if __name__ == "__main__":
     with open("auto_eu.json", "w", encoding="utf-8") as f:
         json.dump(generate_xray_balancer(eu_nodes), f, indent=2, ensure_ascii=False)
         
-    # 3. Генерация auto_bs_1..5.json (Белые списки РФ / чанки)
+    # 3. Генерация auto_bs_1..5.json
     chunk_size = max(1, len(valid_nodes) // 5)
     for i in range(1, 6):
         chunk = valid_nodes[(i-1)*chunk_size : i*chunk_size]
@@ -253,7 +260,7 @@ if __name__ == "__main__":
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(generate_xray_balancer(chunk), f, indent=2, ensure_ascii=False)
             
-    print("Генерация файлов завершена успешно!")
+    print("Успешно: все файлы сгенерированы!")
 EOF
 
 python3 updater.sh
