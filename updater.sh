@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 import os
 import re
 import json
@@ -57,7 +57,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -70,25 +70,34 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# САМАЯ ЖЕСТКАЯ ПРОВЕРКА: Тройной хендшейк + стресс-тест стабильности
-def check_node_extreme(node):
+# ЭЛИТНЫЙ 4-КРАТНЫЙ СТРЕСС-ТЕСТ С HTTP/TLS ЗОНДИРОВАНИЕМ
+def check_node_ultimate(node):
     latencies = []
+    success_count = 0
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # Делаем ТРИ последовательных подключения
-        for _ in range(3):
+        for _ in range(4): # 4 жестких последовательных прохода
             start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=4.0) as sock:
+            with socket.create_connection((node["address"], node["port"]), timeout=6.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
-                    pass
-            latencies.append(time.time() - start_time)
-            time.sleep(0.05)
+                    # Отправляем реальный зондовый HTTP-запрос по TLS
+                    request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
+                    ssock.sendall(request_data)
+                    ssock.recv(64) # Ждем ответа от сервера
             
-        # Если разброс пинга слишком большой (сервер нестабилен) — бракуем
-        if max(latencies) - min(latencies) > 2.5:
+            latencies.append(time.time() - start_time)
+            success_count += 1
+            time.sleep(0.08)
+            
+        # Если хотя бы один проход из четырех сорвался
+        if success_count < 4:
+            return False, 0.0
+            
+        # Если разброс пинга слишком велик (сервер нестабилен под нагрузкой)
+        if max(latencies) - min(latencies) > 3.5:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -99,7 +108,7 @@ def check_node_extreme(node):
 def main():
     print("Загрузка ссылок из всех источников...")
     raw_links = fetch_sources()
-    print(f"Собрано сырых ссылок: {len(raw_links)}")
+    print(f"Собрано уникальных сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -113,7 +122,7 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
-            # Строгая фильтрация: только TLS или Reality
+            # Строжайший фильтр безопасности
             if security not in ["tls", "reality"]:
                 continue
                 
@@ -168,13 +177,13 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод после фильтрации безопасности: {len(parsed_nodes)}")
-    print("🔥 Запуск ЭКСТРЕМАЛЬНОГО тройного стресс-теста (30 потоков для предельной точности)...")
+    print(f"Прошли первичный фильтр безопасности: {len(parsed_nodes)}")
+    print("🔥 Запуск САМОГО ЖЕСТКОГО 4-кратного HTTP/TLS стресс-теста (25 потоков)...")
     
     valid_nodes = []
-    # Снижаем потоки до 30, чтобы сеть GitHub Actions не захлебывалась при тройном опросе
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(check_node_extreme, node): node for node in parsed_nodes}
+    # Ограничиваем до 25 потоков, чтобы каждый сервер получал честные 4 тяжелых запроса без флуда
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        futures = {executor.submit(check_node_ultimate, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -185,10 +194,10 @@ def main():
             except Exception:
                 pass
 
-    # Сортируем по честному среднему пингу от тройного теста
+    # Сортируем по реальной скорости отклика
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
     
-    print(f"💎 Выжило после жесткого отбора: {len(valid_nodes)} серверов")
+    print(f"💎 ИТОГО выжило элитных серверов после жесточайшего отбора: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -290,7 +299,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Экстремальная сборка завершена.")
+    print("Ультимативная проверка завершена. Все файлы созданы.")
 
 if __name__ == "__main__":
     main()
