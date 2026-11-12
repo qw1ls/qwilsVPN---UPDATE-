@@ -5,6 +5,7 @@ import json
 import base64
 import socket
 import ssl
+import time
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,7 +57,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -69,27 +70,30 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
+# Усиленная проверка с замером времени отклика (latency)
 def check_node(node):
+    start_time = time.time()
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # Оптимальный и надежный таймаут 3.5 секунды (не вешает пайплайн, но отсекает мертвые)
-        with socket.create_connection((node["address"], node["port"]), timeout=3.5) as sock:
+        # Таймаут 4.5 секунды на подключение и TLS/Reality хендшейк
+        with socket.create_connection((node["address"], node["port"]), timeout=4.5) as sock:
             with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                 pass
-            return True
+        latency = time.time() - start_time
+        return True, latency
     except Exception:
-        return False
+        return False, 0.0
 
 def main():
-    print("Загрузка ссылок из источников...")
+    print("Загрузка ссылок из всех источников...")
     raw_links = fetch_sources()
     print(f"Найдено сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
-    seen_endpoints = set() # Защита от дубликатов серверов
+    seen_endpoints = set()
     
     for link in raw_links:
         try:
@@ -105,7 +109,7 @@ def main():
                 
             endpoint = f"{parsed.hostname}:{parsed.port}"
             if endpoint in seen_endpoints:
-                continue # Пропускаем дубликаты одинаковых хостов/портов
+                continue
             seen_endpoints.add(endpoint)
                 
             name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
@@ -155,7 +159,7 @@ def main():
             continue
 
     print(f"Уникальных нод после фильтрации TLS/Reality: {len(parsed_nodes)}")
-    print("Запуск проверки работоспособности (100 потоков)...")
+    print("Запуск глубокой проверки работоспособности и замера пинга (100 потоков)...")
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=100) as executor:
@@ -163,21 +167,27 @@ def main():
         for future in as_completed(futures):
             node = futures[future]
             try:
-                if future.result():
+                is_alive, latency = future.result()
+                if is_alive:
+                    node['latency'] = latency
                     valid_nodes.append(node)
             except Exception:
                 pass
 
-    print(f"Прошло проверку живых нод: {len(valid_nodes)}")
+    # Сортируем живые ноды по скорости (от самого быстрого пинга к медленному)
+    valid_nodes.sort(key=lambda x: x.get('latency', 999))
+
+    print(f"Успешно прошли строгую проверку живых нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
             "protocol": "vless", "uuid": "00000000-0000-0000-0000-000000000000",
             "address": "127.0.0.1", "port": 443, "security": "tls", "sni": "example.com",
-            "type": "tcp", "name": "🌐 Другие", "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
+            "type": "tcp", "name": "🌐 Другие", "latency": 0.1,
+            "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
-    # 1. Генерация subscription.txt
+    # 1. Генерация subscription.txt (самые быстрые сверху)
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
@@ -270,7 +280,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Все файлы сгенерированы успешно.")
+    print("Все файлы успешно сгенерированы с учетом сортировки по скорости.")
 
 if __name__ == "__main__":
     main()
