@@ -3,8 +3,11 @@ import os
 import re
 import json
 import base64
+import socket
+import ssl
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SOURCES = [
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
@@ -17,7 +20,6 @@ SOURCES = [
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
-# Полные названия стран и флаги
 COUNTRY_NAMES = {
     "NL": ("🇳🇱", "Нидерланды"),
     "DE": ("🇩🇪", "Германия"),
@@ -50,15 +52,12 @@ COUNTRY_NAMES = {
     "MD": ("🇲🇩", "Молдова"),
 }
 
-def main():
-    print("Запуск быстрого сбора конфигураций...")
+def fetch_sources():
     all_links = []
-    
-    # Чтобы скрипт работал мгновенно (не ждал зависшие источники по 8 секунд), ставим таймаут 3 секунды
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -68,13 +67,31 @@ def main():
                 links = re.findall(r'vless://[^\s<>"]+', content)
                 all_links.extend(links)
         except Exception:
-            pass # Пропускаем медленные/упавшие источники без задержки
+            pass
+    return list(set(all_links))
 
-    unique_links = list(set(all_links))
-    print(f"Собрано уникальных ссылок: {len(unique_links)}")
+# Усиленная глубокая проверка сокета и TLS/Reality рукопожатия с увеличенным таймаутом (7 секунд)
+def check_node(node):
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        # Строгий таймаут 7.0 секунд для тщательной проверки отклика
+        with socket.create_connection((node["address"], node["port"]), timeout=7.0) as sock:
+            with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
+                pass
+            return True
+    except Exception:
+        return False
 
-    valid_nodes = []
-    for link in unique_links:
+def main():
+    print("Загрузка ссылок из всех источников...")
+    raw_links = fetch_sources()
+    print(f"Найдено уникальных сырых ссылок: {len(raw_links)}")
+    
+    parsed_nodes = []
+    for link in raw_links:
         try:
             parsed = urlparse(link)
             if parsed.scheme != "vless":
@@ -83,7 +100,7 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
-            # Строгая фильтрация: только tls или reality
+            # Строгая фильтрация: исключительно tls или reality
             if security not in ["tls", "reality"]:
                 continue
                 
@@ -99,7 +116,7 @@ def main():
             else:
                 flag, c_name = "🌐", "Другие"
             
-            # Формат без двоеточия в начале: Флаг + Название (например: 🇩🇪 Германия)
+            # Название без двоеточия: Флаг + Полное название страны
             clean_name = f"{flag} {c_name}"
 
             node = {
@@ -130,11 +147,25 @@ def main():
             clean_query = parsed.query
             node["raw"] = f"vless://{node['uuid']}@{node['address']}:{node['port']}?{clean_query}#{urllib.parse.quote(clean_name)}"
             
-            valid_nodes.append(node)
+            parsed_nodes.append(node)
         except Exception:
             continue
 
-    print(f"Готово валидных нод: {len(valid_nodes)}")
+    print(f"Прошли фильтрацию безопасности (TLS/Reality): {len(parsed_nodes)}")
+    print("Запуск УСИЛЕННОЙ проверки работоспособности (таймаут 7с, 100 потоков)...")
+    
+    valid_nodes = []
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
+        for future in as_completed(futures):
+            node = futures[future]
+            try:
+                if future.result():
+                    valid_nodes.append(node)
+            except Exception:
+                pass
+
+    print(f"Отобрано железобетонно живых нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -238,7 +269,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Все файлы успешно обновлены!")
+    print("Генерация завершена. Все файлы обновлены.")
 
 if __name__ == "__main__":
     main()
