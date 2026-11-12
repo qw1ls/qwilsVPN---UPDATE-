@@ -6,7 +6,6 @@ import base64
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 
-# Список источников
 SOURCES = [
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
@@ -18,23 +17,48 @@ SOURCES = [
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
-COUNTRY_FLAGS = {
-    "NL": "🇳🇱", "DE": "🇩🇪", "FR": "🇫🇷", "US": "🇺🇸", "GB": "🇬🇧",
-    "FI": "🇫🇮", "SE": "🇸🇪", "PL": "🇵🇱", "CA": "🇨🇦", "SG": "🇸🇬",
-    "TR": "🇹🇷", "JP": "🇯🇵", "KR": "🇰🇷", "IT": "🇮🇹", "ES": "🇪🇸",
-    "CH": "🇨🇭", "AT": "🇦🇹", "NO": "🇳🇴", "DK": "🇩🇰", "IE": "🇮🇪",
-    "RO": "🇷🇴", "UA": "🇺🇦", "CZ": "🇨🇿", "AE": "🇦🇪", "BG": "🇧🇬",
-    "KZ": "🇰🇿", "GE": "🇬🇪", "AM": "🇦🇲", "MD": "🇲🇩", "OTHER": "🌐"
+# Полные названия стран и флаги
+COUNTRY_NAMES = {
+    "NL": ("🇳🇱", "Нидерланды"),
+    "DE": ("🇩🇪", "Германия"),
+    "FR": ("🇫🇷", "Франция"),
+    "US": ("🇺🇸", "США"),
+    "GB": ("🇬🇧", "Великобритания"),
+    "FI": ("🇫🇮", "Финляндия"),
+    "SE": ("🇸🇪", "Швеция"),
+    "PL": ("🇵🇱", "Польша"),
+    "CA": ("🇨🇦", "Канада"),
+    "SG": ("🇸🇬", "Сингапур"),
+    "TR": ("🇹🇷", "Турция"),
+    "JP": ("🇯🇵", "Япония"),
+    "KR": ("🇰🇷", "Южная Корея"),
+    "IT": ("🇮🇹", "Италия"),
+    "ES": ("🇪🇸", "Испания"),
+    "CH": ("🇨🇭", "Швейцария"),
+    "AT": ("🇦🇹", "Австрия"),
+    "NO": ("🇳🇴", "Норвегия"),
+    "DK": ("🇩🇰", "Дания"),
+    "IE": ("🇮🇪", "Ирландия"),
+    "RO": ("🇷🇴", "Румыния"),
+    "UA": ("🇺🇦", "Украина"),
+    "CZ": ("🇨🇿", "Чехия"),
+    "AE": ("🇦🇪", "ОАЭ"),
+    "BG": ("🇧🇬", "Болгария"),
+    "KZ": ("🇰🇿", "Казахстан"),
+    "GE": ("🇬🇪", "Грузия"),
+    "AM": ("🇦🇲", "Армения"),
+    "MD": ("🇲🇩", "Молдова"),
 }
 
 def main():
-    print("Запуск сбора конфигураций...")
+    print("Запуск быстрого сбора конфигураций...")
     all_links = []
     
+    # Чтобы скрипт работал мгновенно (не ждал зависшие источники по 8 секунд), ставим таймаут 3 секунды
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -42,13 +66,12 @@ def main():
                     except Exception:
                         pass
                 links = re.findall(r'vless://[^\s<>"]+', content)
-                print(f"[OK] {url.split('/')[-1]} -> найдено: {len(links)}")
                 all_links.extend(links)
-        except Exception as e:
-            print(f"[WARN] Ошибка загрузки {url}: {e}")
+        except Exception:
+            pass # Пропускаем медленные/упавшие источники без задержки
 
     unique_links = list(set(all_links))
-    print(f"Всего уникальных ссылок собрано: {len(unique_links)}")
+    print(f"Собрано уникальных ссылок: {len(unique_links)}")
 
     valid_nodes = []
     for link in unique_links:
@@ -66,13 +89,18 @@ def main():
                 
             name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
             country_code = "OTHER"
-            for code in COUNTRY_FLAGS.keys():
+            for code in COUNTRY_NAMES.keys():
                 if code in name_decoded.upper() or code.lower() in parsed.hostname.lower():
                     country_code = code
                     break
             
-            flag = COUNTRY_FLAGS.get(country_code, "🌐")
-            clean_name = f"{flag} : {country_code}"
+            if country_code in COUNTRY_NAMES:
+                flag, c_name = COUNTRY_NAMES[country_code]
+            else:
+                flag, c_name = "🌐", "Другие"
+            
+            # Формат без двоеточия в начале: Флаг + Название (например: 🇩🇪 Германия)
+            clean_name = f"{flag} {c_name}"
 
             node = {
                 "protocol": "vless",
@@ -106,15 +134,13 @@ def main():
         except Exception:
             continue
 
-    print(f"Прошло фильтрацию TLS/Reality: {len(valid_nodes)}")
+    print(f"Готово валидных нод: {len(valid_nodes)}")
 
-    # Защита от пустого списка, чтобы скрипт никогда не падал
     if not valid_nodes:
-        print("[WARN] Ноды не найдены, используем дефолтную заглушку.")
         valid_nodes = [{
             "protocol": "vless", "uuid": "00000000-0000-0000-0000-000000000000",
             "address": "127.0.0.1", "port": 443, "security": "tls", "sni": "example.com",
-            "type": "tcp", "name": "🌐 : OTHER", "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%3A%20OTHER"
+            "type": "tcp", "name": "🌐 Другие", "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
     # 1. Генерация subscription.txt
@@ -127,7 +153,6 @@ def main():
 
     os.makedirs(".", exist_ok=True)
 
-    # Функция формирования streamSettings для Xray
     def build_stream(node):
         stream = {
             "network": node.get("type", "tcp"),
@@ -197,7 +222,7 @@ def main():
         }
 
     # 2. Генерация auto_eu.json
-    eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["🇳🇱", "🇩🇪", "🇫🇷", "🇫🇮", "🇸🇪", "PL"])]
+    eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["Германия", "Нидерланды", "Франция", "Финляндия", "Швеция", "Польша"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
         
@@ -213,7 +238,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Все файлы успешно созданы. Завершение без ошибок.")
+    print("Все файлы успешно обновлены!")
 
 if __name__ == "__main__":
     main()
