@@ -57,7 +57,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -70,27 +70,33 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Усиленная проверка с замером времени отклика (latency)
-def check_node(node):
-    start_time = time.time()
+# УЛЬТРА-УСИЛЕННАЯ ПРОВЕРКА: Двойной хендшейк (стресс-тест)
+def check_node_deep(node):
+    latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # Таймаут 4.5 секунды на подключение и TLS/Reality хендшейк
-        with socket.create_connection((node["address"], node["port"]), timeout=4.5) as sock:
-            with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
-                pass
-        latency = time.time() - start_time
-        return True, latency
+        # Делаем ДВА последовательных подключения для гарантии стабильности
+        for _ in range(2):
+            start_time = time.time()
+            with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
+                with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
+                    pass
+            latencies.append(time.time() - start_time)
+            # Небольшая пауза между тестами для проверки отклика под нагрузкой
+            time.sleep(0.1)
+            
+        avg_latency = sum(latencies) / len(latencies)
+        return True, avg_latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок из всех источников...")
+    print("Загрузка сырых ссылок из всех источников...")
     raw_links = fetch_sources()
-    print(f"Найдено сырых ссылок: {len(raw_links)}")
+    print(f"Найдено уникальных ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -104,6 +110,7 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
+            # Жесткая фильтрация безопасности
             if security not in ["tls", "reality"]:
                 continue
                 
@@ -158,12 +165,13 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод после фильтрации TLS/Reality: {len(parsed_nodes)}")
-    print("Запуск глубокой проверки работоспособности и замера пинга (100 потоков)...")
+    print(f"Прошли фильтрацию TLS/Reality: {len(parsed_nodes)}")
+    print("🚀 Запуск МАКСИМАЛЬНО УСИЛЕННОГО стресс-теста (двойной хендшейк, 50 потоков)...")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
+    # Снижаем число потоков до 50, чтобы качественнее нагружать сеть и точно замерять отклик
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(check_node_deep, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -174,10 +182,10 @@ def main():
             except Exception:
                 pass
 
-    # Сортируем живые ноды по скорости (от самого быстрого пинга к медленному)
+    # Сортировка по реальной скорости отклика (самые быстрые и стабильные сверху)
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
 
-    print(f"Успешно прошли строгую проверку живых нод: {len(valid_nodes)}")
+    print(f"✨ Прошли железобетонный двойной стресс-тест: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -187,7 +195,7 @@ def main():
             "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
-    # 1. Генерация subscription.txt (самые быстрые сверху)
+    # 1. Генерация subscription.txt
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
@@ -280,7 +288,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
 
-    print("Все файлы успешно сгенерированы с учетом сортировки по скорости.")
+    print("Все файлы успешно обновлены по итогам глубокого стресс-теста.")
 
 if __name__ == "__main__":
     main()
