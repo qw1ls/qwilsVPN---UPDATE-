@@ -11,14 +11,19 @@ from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SOURCES = [
+    # Ваши основные кастомные и проверенные источники
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
     "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/blacklist_all.txt",
     "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/whitelist_all.txt",
+    # Новые мощные репозитории
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt",
+    "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/v2ray-base64.txt",
 ]
 
+# Добавляем 25 подписок hiztin
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
@@ -72,15 +77,15 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# ЭКСТРЕМАЛЬНЫЙ 8-КРАТНЫЙ СТРЕСС-ТЕСТ СКОРОСТИ И СТАБИЛЬНОСТИ
-def check_node_extreme_brutal(node):
+# ЭКСТРЕМАЛЬНЫЙ 10-КРАТНЫЙ СТРЕСС-ТЕСТ СКОРОСТИ И СТАБИЛЬНОСТИ
+def check_node_mega_brutal(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(8): # 8 железобетонных последовательных проверок
+        for _ in range(10): # 10 железных проходов
             start_time = time.time()
             with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
@@ -88,10 +93,10 @@ def check_node_extreme_brutal(node):
                     ssock.sendall(request_data)
                     ssock.recv(64)
             latencies.append(time.time() - start_time)
-            time.sleep(0.03)
+            time.sleep(0.02)
             
-        # Строжайший контроль джиттера: если пинг скачет сильнее чем на 1.5 сек — брак
-        if max(latencies) - min(latencies) > 1.5:
+        # Строжайший контроль пинга (разброс не более 1.0 секунды)
+        if max(latencies) - min(latencies) > 1.0:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -109,7 +114,6 @@ def main():
     
     for link in raw_links:
         try:
-            # Полная очистка урлов от мусора и битых хвостов
             if "%23" in link:
                 link = link.split("%23")[0]
             if "#" in link:
@@ -130,15 +134,19 @@ def main():
                 continue
             seen_endpoints.add(endpoint)
                 
-            # Жесткое приведение типа транспорта к валидным значениям для ядра
             net_type = query.get("type", ["tcp"])[0].lower()
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
-            name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
+            # Исправленное точное определение страны без ложных срабатываний (чтобы не путать со Швецией)
+            name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
+            full_text = f"{name_decoded} {parsed.hostname}".upper()
+            
             country_code = "OTHER"
+            # Сначала ищем четкие маркеры вида [NL], DE, NL-Server и т.д.
             for code in COUNTRY_NAMES.keys():
-                if code in name_decoded.upper() or code.lower() in parsed.hostname.lower():
+                pattern = rf"\b{code}\b"
+                if re.search(pattern, full_text):
                     country_code = code
                     break
             
@@ -183,12 +191,12 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных очищенных нод: {len(parsed_nodes)}")
-    print("🔥 Запуск 8-кратного экстремального стресс-теста (15 потоков)...")
+    print(f"Уникальных очищенных нод для проверки: {len(parsed_nodes)}")
+    print("🔥 Запуск 10-кратного мега-стресс-теста (10 потоков)...")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = {executor.submit(check_node_extreme_brutal, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_node_mega_brutal, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -200,7 +208,7 @@ def main():
                 pass
 
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Выжило элитных и абсолютно стабильных нод: {len(valid_nodes)}")
+    print(f"💎 Отобрано элитных нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -250,7 +258,7 @@ def main():
     def make_balancer(nodes_chunk):
         outbounds = []
         balancer_targets = []
-        for i, node in enumerate(nodes_chunk[:50]):
+        for i, node in enumerate(nodes_chunk[:30]):
             tag = f"proxy_{i}"
             balancer_targets.append(tag)
             outbound = {
@@ -324,7 +332,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(bs_data, f, indent=2, ensure_ascii=False)
 
-    print("Все конфигурации и балансировщики сгенерированы успешно.")
+    print("Все файлы сгенерированы идеально.")
 
 if __name__ == "__main__":
     main()
