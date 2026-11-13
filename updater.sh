@@ -15,6 +15,8 @@ SOURCES = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
+    "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/blacklist_all.txt",
+    "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/whitelist_all.txt",
 ]
 
 for i in range(1, 26):
@@ -70,26 +72,26 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# УЛЬТРА-ЖЕСТКАЯ ПРОВЕРКА: 5 проходов с HTTP/TLS зондированием и контролем стабильности
-def check_node_brutal(node):
+# ЭКСТРЕМАЛЬНЫЙ 8-КРАТНЫЙ СТРЕСС-ТЕСТ СКОРОСТИ И СТАБИЛЬНОСТИ
+def check_node_extreme_brutal(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(5): # 5 жестких последовательных тестов
+        for _ in range(8): # 8 железобетонных последовательных проверок
             start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=6.0) as sock:
+            with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
                     ssock.recv(64)
             latencies.append(time.time() - start_time)
-            time.sleep(0.05)
+            time.sleep(0.03)
             
-        # Если пинг скачет слишком сильно или есть обрывы — брак
-        if max(latencies) - min(latencies) > 3.0:
+        # Строжайший контроль джиттера: если пинг скачет сильнее чем на 1.5 сек — брак
+        if max(latencies) - min(latencies) > 1.5:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -98,7 +100,7 @@ def check_node_brutal(node):
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок из всех источников...")
+    print("Загрузка ссылок со всех источников...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -107,6 +109,12 @@ def main():
     
     for link in raw_links:
         try:
+            # Полная очистка урлов от мусора и битых хвостов
+            if "%23" in link:
+                link = link.split("%23")[0]
+            if "#" in link:
+                link = link.split("#")[0]
+
             parsed = urlparse(link)
             if parsed.scheme != "vless":
                 continue
@@ -122,6 +130,11 @@ def main():
                 continue
             seen_endpoints.add(endpoint)
                 
+            # Жесткое приведение типа транспорта к валидным значениям для ядра
+            net_type = query.get("type", ["tcp"])[0].lower()
+            if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
+                net_type = "tcp"
+
             name_decoded = unquote(parsed.fragment) if parsed.fragment else "Server"
             country_code = "OTHER"
             for code in COUNTRY_NAMES.keys():
@@ -144,7 +157,7 @@ def main():
                 "security": security,
                 "sni": query.get("sni", [parsed.hostname])[0],
                 "fp": query.get("fp", ["chrome"])[0],
-                "type": query.get("type", ["tcp"])[0],
+                "type": net_type,
                 "name": clean_name,
             }
             
@@ -152,28 +165,30 @@ def main():
                 node["pbk"] = query.get("pbk", [""])[0]
                 node["sid"] = query.get("sid", [""])[0]
                 
-            net = node["type"]
-            if net == "ws":
+            if net_type == "ws":
                 node["path"] = query.get("path", ["/"])[0]
                 node["host"] = query.get("host", [""])[0]
-            elif net == "grpc":
+            elif net_type == "grpc":
                 node["serviceName"] = query.get("serviceName", [""])[0]
-            elif net == "xhttp":
+            elif net_type == "xhttp":
                 node["path"] = query.get("path", ["/"])[0]
             
-            clean_query = parsed.query
+            clean_query = f"security={security}&type={net_type}&sni={node['sni']}&fp={node['fp']}"
+            if security == "reality":
+                clean_query += f"&pbk={node.get('pbk','')}&sid={node.get('sid','')}"
+            
             node["raw"] = f"vless://{node['uuid']}@{node['address']}:{node['port']}?{clean_query}#{urllib.parse.quote(clean_name)}"
             
             parsed_nodes.append(node)
         except Exception:
             continue
 
-    print(f"Уникальных нод после фильтрации безопасности: {len(parsed_nodes)}")
-    print("🔥 Запуск 5-кратного брутального стресс-теста (20 потоков)...")
+    print(f"Уникальных очищенных нод: {len(parsed_nodes)}")
+    print("🔥 Запуск 8-кратного экстремального стресс-теста (15 потоков)...")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(check_node_brutal, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(check_node_extreme_brutal, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -185,9 +200,8 @@ def main():
                 pass
 
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Выжило железобетонно живых нод: {len(valid_nodes)}")
+    print(f"💎 Выжило элитных и абсолютно стабильных нод: {len(valid_nodes)}")
 
-    # Защитная заглушка, чтобы список никогда не был пустым и ядро не падало
     if not valid_nodes:
         valid_nodes = [{
             "protocol": "vless", "uuid": "00000000-0000-0000-0000-000000000000",
@@ -253,13 +267,15 @@ def main():
             }
             outbounds.append(outbound)
 
-        # Гарантируем, что список targets никогда не пустой, чтобы ядро Happ не выдавало ошибку
         if not balancer_targets:
             balancer_targets = ["fallback_proxy"]
             outbounds.append({
                 "tag": "fallback_proxy",
                 "protocol": "vless",
-                "settings": {"vnext": [{"address": "127.0.0.1", "port": 443, "users": [{"id": "00000000-0000-0000-0000-000000000000"}]}]},
+                "settings": {"vnext": [{
+                    "address": "127.0.0.1", "port": 443, 
+                    "users": [{"id": "00000000-0000-0000-0000-000000000000", "encryption": "none"}]
+                }]},
                 "streamSettings": {"network": "tcp", "security": "tls"}
             })
 
@@ -284,19 +300,18 @@ def main():
             ]
         }
 
-    # 2. Генерация auto_eu.json с флагом Евросоюза и названием "🇪🇺 Авто"
+    # 2. Генерация auto_eu.json (🇪🇺 Авто)
     eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["Германия", "Нидерланды", "Франция", "Финляндия", "Швеция", "Польша"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
         
     balancer_data = make_balancer(eu_nodes)
-    # Добавляем комментарий/метку имени для интерфейса
     balancer_data["tag_name"] = "🇪🇺 Авто"
     
     with open("auto_eu.json", "w", encoding="utf-8") as f:
         json.dump(balancer_data, f, indent=2, ensure_ascii=False)
         
-    # 3. Генерация 5 файлов с белыми списками (БС - 1..5) с флагом России и именами "🇷🇺 Авто БС - 1..5"
+    # 3. Генерация 5 файлов белых списков (🇷🇺 Авто БС - 1..5)
     chunk_size = max(1, len(valid_nodes) // 5)
     for i in range(1, 6):
         chunk = valid_nodes[(i-1)*chunk_size : i*chunk_size]
@@ -309,7 +324,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(bs_data, f, indent=2, ensure_ascii=False)
 
-    print("Все конфигурации сбалансированы и успешно созданы.")
+    print("Все конфигурации и балансировщики сгенерированы успешно.")
 
 if __name__ == "__main__":
     main()
