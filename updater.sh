@@ -70,34 +70,26 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# ЭЛИТНЫЙ 4-КРАТНЫЙ СТРЕСС-ТЕСТ С HTTP/TLS ЗОНДИРОВАНИЕМ
-def check_node_ultimate(node):
+# УЛЬТРА-ЖЕСТКАЯ ПРОВЕРКА: 5 проходов с HTTP/TLS зондированием и контролем стабильности
+def check_node_brutal(node):
     latencies = []
-    success_count = 0
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(4): # 4 жестких последовательных прохода
+        for _ in range(5): # 5 жестких последовательных тестов
             start_time = time.time()
             with socket.create_connection((node["address"], node["port"]), timeout=6.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
-                    # Отправляем реальный зондовый HTTP-запрос по TLS
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
-                    ssock.recv(64) # Ждем ответа от сервера
-            
+                    ssock.recv(64)
             latencies.append(time.time() - start_time)
-            success_count += 1
-            time.sleep(0.08)
+            time.sleep(0.05)
             
-        # Если хотя бы один проход из четырех сорвался
-        if success_count < 4:
-            return False, 0.0
-            
-        # Если разброс пинга слишком велик (сервер нестабилен под нагрузкой)
-        if max(latencies) - min(latencies) > 3.5:
+        # Если пинг скачет слишком сильно или есть обрывы — брак
+        if max(latencies) - min(latencies) > 3.0:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -108,7 +100,7 @@ def check_node_ultimate(node):
 def main():
     print("Загрузка ссылок из всех источников...")
     raw_links = fetch_sources()
-    print(f"Собрано уникальных сырых ссылок: {len(raw_links)}")
+    print(f"Собрано сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -122,7 +114,6 @@ def main():
             query = parse_qs(parsed.query)
             security = query.get("security", [""])[0].lower()
             
-            # Строжайший фильтр безопасности
             if security not in ["tls", "reality"]:
                 continue
                 
@@ -177,13 +168,12 @@ def main():
         except Exception:
             continue
 
-    print(f"Прошли первичный фильтр безопасности: {len(parsed_nodes)}")
-    print("🔥 Запуск САМОГО ЖЕСТКОГО 4-кратного HTTP/TLS стресс-теста (25 потоков)...")
+    print(f"Уникальных нод после фильтрации безопасности: {len(parsed_nodes)}")
+    print("🔥 Запуск 5-кратного брутального стресс-теста (20 потоков)...")
     
     valid_nodes = []
-    # Ограничиваем до 25 потоков, чтобы каждый сервер получал честные 4 тяжелых запроса без флуда
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        futures = {executor.submit(check_node_ultimate, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(check_node_brutal, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -194,11 +184,10 @@ def main():
             except Exception:
                 pass
 
-    # Сортируем по реальной скорости отклика
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    
-    print(f"💎 ИТОГО выжило элитных серверов после жесточайшего отбора: {len(valid_nodes)}")
+    print(f"💎 Выжило железобетонно живых нод: {len(valid_nodes)}")
 
+    # Защитная заглушка, чтобы список никогда не был пустым и ядро не падало
     if not valid_nodes:
         valid_nodes = [{
             "protocol": "vless", "uuid": "00000000-0000-0000-0000-000000000000",
@@ -207,6 +196,7 @@ def main():
             "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
+    # 1. Генерация subscription.txt
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
@@ -263,6 +253,16 @@ def main():
             }
             outbounds.append(outbound)
 
+        # Гарантируем, что список targets никогда не пустой, чтобы ядро Happ не выдавало ошибку
+        if not balancer_targets:
+            balancer_targets = ["fallback_proxy"]
+            outbounds.append({
+                "tag": "fallback_proxy",
+                "protocol": "vless",
+                "settings": {"vnext": [{"address": "127.0.0.1", "port": 443, "users": [{"id": "00000000-0000-0000-0000-000000000000"}]}]},
+                "streamSettings": {"network": "tcp", "security": "tls"}
+            })
+
         return {
             "log": {"loglevel": "warning"},
             "routing": {
@@ -284,22 +284,32 @@ def main():
             ]
         }
 
+    # 2. Генерация auto_eu.json с флагом Евросоюза и названием "🇪🇺 Авто"
     eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["Германия", "Нидерланды", "Франция", "Финляндия", "Швеция", "Польша"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
         
+    balancer_data = make_balancer(eu_nodes)
+    # Добавляем комментарий/метку имени для интерфейса
+    balancer_data["tag_name"] = "🇪🇺 Авто"
+    
     with open("auto_eu.json", "w", encoding="utf-8") as f:
-        json.dump(make_balancer(eu_nodes), f, indent=2, ensure_ascii=False)
+        json.dump(balancer_data, f, indent=2, ensure_ascii=False)
         
+    # 3. Генерация 5 файлов с белыми списками (БС - 1..5) с флагом России и именами "🇷🇺 Авто БС - 1..5"
     chunk_size = max(1, len(valid_nodes) // 5)
     for i in range(1, 6):
         chunk = valid_nodes[(i-1)*chunk_size : i*chunk_size]
         if not chunk:
             chunk = valid_nodes
+            
+        bs_data = make_balancer(chunk)
+        bs_data["tag_name"] = f"🇷🇺 Авто БС - {i}"
+        
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
-            json.dump(make_balancer(chunk), f, indent=2, ensure_ascii=False)
+            json.dump(bs_data, f, indent=2, ensure_ascii=False)
 
-    print("Ультимативная проверка завершена. Все файлы созданы.")
+    print("Все конфигурации сбалансированы и успешно созданы.")
 
 if __name__ == "__main__":
     main()
