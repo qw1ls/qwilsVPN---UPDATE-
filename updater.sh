@@ -61,7 +61,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -74,17 +74,16 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Проверка на реальную скорость: отсекает всё, что дольше 0.12 сек (120 мс) или нестабильно
-def check_node_speed_and_stability(node):
+def check_node(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(4): # 4 быстрых, но точных прохода
+        for _ in range(3):
             start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=3.0) as sock:
+            with socket.create_connection((node["address"], node["port"]), timeout=4.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
@@ -92,17 +91,12 @@ def check_node_speed_and_stability(node):
             latencies.append(time.time() - start_time)
             
         avg_latency = sum(latencies) / len(latencies)
-        
-        # ЖЕСТКИЙ ФИЛЬТР: Если средний реальный пинг выше 120мс или большой разброс — брак
-        if avg_latency > 0.12 or (max(latencies) - min(latencies) > 0.6):
-            return False, 0.0
-            
         return True, avg_latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок из всех источников...")
+    print("Загрузка ссылок...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -185,12 +179,11 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод для проверки по скорости: {len(parsed_nodes)}")
-    print("🔥 Запуск скоростного стресс-теста с отсевом медленных серверов (>120мс)...")
+    print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=35) as executor:
-        futures = {executor.submit(check_node_speed_and_stability, node): node for node in parsed_nodes}
+        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -201,9 +194,8 @@ def main():
             except Exception:
                 pass
 
-    # Сортируем строго по реальному быстродействию (самые быстрые сверху)
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Отобрано ЭЛИТНЫХ и быстрых нод (пинг < 120мс): {len(valid_nodes)}")
+    print(f"💎 Рабочих нод после проверки: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -216,8 +208,9 @@ def main():
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
+    current_timestamp = int(time.time())
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write("#profile-title: base64:qwils UPDATE LTE\n")
+        f.write(f"#profile-title: base64:qwils UPDATE {current_timestamp}\n")
         f.write(encoded_sub)
 
     os.makedirs(".", exist_ok=True)
@@ -252,7 +245,6 @@ def main():
     def make_balancer(nodes_chunk, balancer_name):
         outbounds = []
         balancer_targets = []
-        # Берем топ-25 самых быстрых серверов для идеального JSON
         for i, node in enumerate(nodes_chunk[:25]):
             tag = f"proxy_{i}"
             balancer_targets.append(tag)
@@ -322,7 +314,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Готово! Все файлы обновлены строго по критерию быстрого пинга.")
+    print("Все файлы сгенерированы и кэш обновлен.")
 
 if __name__ == "__main__":
     main()
