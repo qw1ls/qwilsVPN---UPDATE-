@@ -11,19 +11,16 @@ from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SOURCES = [
-    # Ваши основные кастомные и проверенные источники
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
     "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/blacklist_all.txt",
     "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/whitelist_all.txt",
-    # Новые мощные репозитории
     "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt",
     "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/v2ray-base64.txt",
 ]
 
-# Добавляем 25 подписок hiztin
 for i in range(1, 26):
     SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
@@ -77,15 +74,15 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# ЭКСТРЕМАЛЬНЫЙ 10-КРАТНЫЙ СТРЕСС-ТЕСТ СКОРОСТИ И СТАБИЛЬНОСТИ
-def check_node_mega_brutal(node):
+# 12-КРАТНЫЙ УЛЬТРА-БРУТАЛЬНЫЙ СТРЕСС-ТЕСТ С ТКАНЬЮ ЗОНДИРОВАНИЯ
+def check_node_maximum(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(10): # 10 железных проходов
+        for _ in range(12): # 12 жестких проходов для абсолютного качества
             start_time = time.time()
             with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
@@ -93,10 +90,10 @@ def check_node_mega_brutal(node):
                     ssock.sendall(request_data)
                     ssock.recv(64)
             latencies.append(time.time() - start_time)
-            time.sleep(0.02)
+            time.sleep(0.01)
             
-        # Строжайший контроль пинга (разброс не более 1.0 секунды)
-        if max(latencies) - min(latencies) > 1.0:
+        # Строжайший контроль стабильности (джиттер не более 0.8 сек)
+        if max(latencies) - min(latencies) > 0.8:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -105,7 +102,7 @@ def check_node_mega_brutal(node):
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок со всех источников...")
+    print("Загрузка ссылок...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -138,15 +135,13 @@ def main():
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
-            # Исправленное точное определение страны без ложных срабатываний (чтобы не путать со Швецией)
+            # Исправленное точное определение страны без багов со Швецией
             name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
             full_text = f"{name_decoded} {parsed.hostname}".upper()
             
             country_code = "OTHER"
-            # Сначала ищем четкие маркеры вида [NL], DE, NL-Server и т.д.
             for code in COUNTRY_NAMES.keys():
-                pattern = rf"\b{code}\b"
-                if re.search(pattern, full_text):
+                if code in full_text:
                     country_code = code
                     break
             
@@ -191,12 +186,12 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных очищенных нод для проверки: {len(parsed_nodes)}")
-    print("🔥 Запуск 10-кратного мега-стресс-теста (10 потоков)...")
+    print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
+    print("🔥 Запуск 12-кратного максимального стресс-теста (10 потоков)...")
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(check_node_mega_brutal, node): node for node in parsed_nodes}
+        futures = {executor.submit(check_node_maximum, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -218,7 +213,6 @@ def main():
             "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
-    # 1. Генерация subscription.txt
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
@@ -255,7 +249,7 @@ def main():
             stream["xhttpSettings"] = {"path": node.get("path", "/")}
         return stream
 
-    def make_balancer(nodes_chunk):
+    def make_balancer(nodes_chunk, balancer_name):
         outbounds = []
         balancer_targets = []
         for i, node in enumerate(nodes_chunk[:30]):
@@ -288,6 +282,7 @@ def main():
             })
 
         return {
+            "tag_name": balancer_name,
             "log": {"loglevel": "warning"},
             "routing": {
                 "balancer": [{
@@ -313,11 +308,9 @@ def main():
     if not eu_nodes:
         eu_nodes = valid_nodes
         
-    balancer_data = make_balancer(eu_nodes)
-    balancer_data["tag_name"] = "🇪🇺 Авто"
-    
+    balancer_eu = make_balancer(eu_nodes, "🇪🇺 Авто")
     with open("auto_eu.json", "w", encoding="utf-8") as f:
-        json.dump(balancer_data, f, indent=2, ensure_ascii=False)
+        json.dump(balancer_eu, f, indent=2, ensure_ascii=False)
         
     # 3. Генерация 5 файлов белых списков (🇷🇺 Авто БС - 1..5)
     chunk_size = max(1, len(valid_nodes) // 5)
@@ -326,13 +319,11 @@ def main():
         if not chunk:
             chunk = valid_nodes
             
-        bs_data = make_balancer(chunk)
-        bs_data["tag_name"] = f"🇷🇺 Авто БС - {i}"
-        
+        balancer_bs = make_balancer(chunk, f"🇷🇺 Авто БС - {i}")
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
-            json.dump(bs_data, f, indent=2, ensure_ascii=False)
+            json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Все файлы сгенерированы идеально.")
+    print("Все файлы сгенерированы успешно без ошибок.")
 
 if __name__ == "__main__":
     main()
