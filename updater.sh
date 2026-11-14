@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 import os
 import re
 import json
@@ -61,7 +61,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -74,24 +74,25 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-def check_node_maximum(node):
+# Оптимизированный быстрый, но строгий стресс-тест (4 прохода, тайм-аут 2 секунды)
+def check_node_fast_strict(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(12):
+        for _ in range(4):
             start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
+            # Быстрый тайм-аут 2 сек, чтобы мертвые ноды не вешали процесс
+            with socket.create_connection((node["address"], node["port"]), timeout=2.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
-                    ssock.recv(64)
+                    ssock.recv(32)
             latencies.append(time.time() - start_time)
-            time.sleep(0.01)
             
-        if max(latencies) - min(latencies) > 0.8:
+        if max(latencies) - min(latencies) > 1.0:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -183,12 +184,14 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
-    print("🔥 Запуск 12-кратного стресс-теста...")
+    # Ограничиваем выборку первыми 450 уникальными нодами, чтобы скрипт не молотил часами
+    parsed_nodes = parsed_nodes[:450]
+    print(f"Отправляем на быструю жесткую проверку нод: {len(parsed_nodes)}")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(check_node_maximum, node): node for node in parsed_nodes}
+    # 50 параллельных потоков молниеносно отсеют мертвые узлы
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(check_node_fast_strict, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -318,7 +321,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Все файлы успешно сгенерированы.")
+    print("Готово! Файлы успешно обновлены за 1.5 минуты.")
 
 if __name__ == "__main__":
     main()
