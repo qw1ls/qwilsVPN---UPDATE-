@@ -61,7 +61,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -74,36 +74,35 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Глубокий, строгий и качественный стресс-тест с TLS/HTTP зондированием
-def check_node_deep_strict(node):
+# Проверка на реальную скорость: отсекает всё, что дольше 0.12 сек (120 мс) или нестабильно
+def check_node_speed_and_stability(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        # 6 качественных циклов проверки для отсечения нестабильных узлов
-        for _ in range(6):
+        for _ in range(4): # 4 быстрых, но точных прохода
             start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=6.0) as sock:
+            with socket.create_connection((node["address"], node["port"]), timeout=3.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
-                    ssock.recv(64)
+                    ssock.recv(32)
             latencies.append(time.time() - start_time)
-            time.sleep(0.02)
-            
-        # Контроль джиттера (скачков пинга)
-        if max(latencies) - min(latencies) > 1.5:
-            return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
+        
+        # ЖЕСТКИЙ ФИЛЬТР: Если средний реальный пинг выше 120мс или большой разброс — брак
+        if avg_latency > 0.12 or (max(latencies) - min(latencies) > 0.6):
+            return False, 0.0
+            
         return True, avg_latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок со всех источников...")
+    print("Загрузка ссылок из всех источников...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -136,13 +135,11 @@ def main():
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
-            # Исправленный поиск страны: анализируем декодированное имя и хост на наличие кодов стран
             name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
             full_text = f"{name_decoded} {parsed.path} {parsed.hostname}".upper()
             
             country_code = "OTHER"
             for code in COUNTRY_NAMES.keys():
-                # Ищем код страны как самостоятельное слово или в составе разделителей (например DE-Server, [NL], FR_)
                 if re.search(rf"(^|[^A-Z]){code}([^A-Z]|$)", full_text):
                     country_code = code
                     break
@@ -188,13 +185,12 @@ def main():
         except Exception:
             continue
 
-    print(f"Всего уникальных нод для глубокой проверки: {len(parsed_nodes)}")
-    print("🔥 Запуск полноценной глубокой проверки (это займет несколько минут, ждем без спешки)...")
+    print(f"Уникальных нод для проверки по скорости: {len(parsed_nodes)}")
+    print("🔥 Запуск скоростного стресс-теста с отсевом медленных серверов (>120мс)...")
     
     valid_nodes = []
-    # 20 потоков — оптимальный баланс между скоростью и стабильностью сети
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(check_node_deep_strict, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=35) as executor:
+        futures = {executor.submit(check_node_speed_and_stability, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -205,8 +201,9 @@ def main():
             except Exception:
                 pass
 
+    # Сортируем строго по реальному быстродействию (самые быстрые сверху)
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Успешно прошли глубокий тест и отобраны: {len(valid_nodes)}")
+    print(f"💎 Отобрано ЭЛИТНЫХ и быстрых нод (пинг < 120мс): {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -255,7 +252,8 @@ def main():
     def make_balancer(nodes_chunk, balancer_name):
         outbounds = []
         balancer_targets = []
-        for i, node in enumerate(nodes_chunk[:30]):
+        # Берем топ-25 самых быстрых серверов для идеального JSON
+        for i, node in enumerate(nodes_chunk[:25]):
             tag = f"proxy_{i}"
             balancer_targets.append(tag)
             outbound = {
@@ -324,7 +322,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Глубокая проверка завершена, все файлы и балансировщики записаны.")
+    print("Готово! Все файлы обновлены строго по критерию быстрого пинга.")
 
 if __name__ == "__main__":
     main()
