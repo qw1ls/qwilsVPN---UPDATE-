@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 import os
 import re
 import json
@@ -61,7 +61,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -74,25 +74,27 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Оптимизированный быстрый, но строгий стресс-тест (4 прохода, тайм-аут 2 секунды)
-def check_node_fast_strict(node):
+# Глубокий, строгий и качественный стресс-тест с TLS/HTTP зондированием
+def check_node_deep_strict(node):
     latencies = []
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(4):
+        # 6 качественных циклов проверки для отсечения нестабильных узлов
+        for _ in range(6):
             start_time = time.time()
-            # Быстрый тайм-аут 2 сек, чтобы мертвые ноды не вешали процесс
-            with socket.create_connection((node["address"], node["port"]), timeout=2.0) as sock:
+            with socket.create_connection((node["address"], node["port"]), timeout=6.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
                     request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
                     ssock.sendall(request_data)
-                    ssock.recv(32)
+                    ssock.recv(64)
             latencies.append(time.time() - start_time)
+            time.sleep(0.02)
             
-        if max(latencies) - min(latencies) > 1.0:
+        # Контроль джиттера (скачков пинга)
+        if max(latencies) - min(latencies) > 1.5:
             return False, 0.0
             
         avg_latency = sum(latencies) / len(latencies)
@@ -101,7 +103,7 @@ def check_node_fast_strict(node):
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок...")
+    print("Загрузка ссылок со всех источников...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -134,12 +136,14 @@ def main():
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
+            # Исправленный поиск страны: анализируем декодированное имя и хост на наличие кодов стран
             name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
-            full_text = f"{name_decoded} {parsed.hostname}".upper()
+            full_text = f"{name_decoded} {parsed.path} {parsed.hostname}".upper()
             
             country_code = "OTHER"
             for code in COUNTRY_NAMES.keys():
-                if code in full_text:
+                # Ищем код страны как самостоятельное слово или в составе разделителей (например DE-Server, [NL], FR_)
+                if re.search(rf"(^|[^A-Z]){code}([^A-Z]|$)", full_text):
                     country_code = code
                     break
             
@@ -184,14 +188,13 @@ def main():
         except Exception:
             continue
 
-    # Ограничиваем выборку первыми 450 уникальными нодами, чтобы скрипт не молотил часами
-    parsed_nodes = parsed_nodes[:450]
-    print(f"Отправляем на быструю жесткую проверку нод: {len(parsed_nodes)}")
+    print(f"Всего уникальных нод для глубокой проверки: {len(parsed_nodes)}")
+    print("🔥 Запуск полноценной глубокой проверки (это займет несколько минут, ждем без спешки)...")
     
     valid_nodes = []
-    # 50 параллельных потоков молниеносно отсеют мертвые узлы
-    with ThreadPoolExecutor(max_workers=50) as executor:
-        futures = {executor.submit(check_node_fast_strict, node): node for node in parsed_nodes}
+    # 20 потоков — оптимальный баланс между скоростью и стабильностью сети
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(check_node_deep_strict, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -203,7 +206,7 @@ def main():
                 pass
 
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Отобрано элитных нод: {len(valid_nodes)}")
+    print(f"💎 Успешно прошли глубокий тест и отобраны: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -321,7 +324,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Готово! Файлы успешно обновлены за 1.5 минуты.")
+    print("Глубокая проверка завершена, все файлы и балансировщики записаны.")
 
 if __name__ == "__main__":
     main()
