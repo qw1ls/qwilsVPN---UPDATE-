@@ -74,7 +74,6 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# 12-КРАТНЫЙ УЛЬТРА-БРУТАЛЬНЫЙ СТРЕСС-ТЕСТ С ТКАНЬЮ ЗОНДИРОВАНИЯ
 def check_node_maximum(node):
     latencies = []
     try:
@@ -82,7 +81,7 @@ def check_node_maximum(node):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        for _ in range(12): # 12 жестких проходов для абсолютного качества
+        for _ in range(12):
             start_time = time.time()
             with socket.create_connection((node["address"], node["port"]), timeout=5.0) as sock:
                 with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
@@ -92,7 +91,6 @@ def check_node_maximum(node):
             latencies.append(time.time() - start_time)
             time.sleep(0.01)
             
-        # Строжайший контроль стабильности (джиттер не более 0.8 сек)
         if max(latencies) - min(latencies) > 0.8:
             return False, 0.0
             
@@ -135,7 +133,6 @@ def main():
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
-            # Исправленное точное определение страны без багов со Швецией
             name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
             full_text = f"{name_decoded} {parsed.hostname}".upper()
             
@@ -187,7 +184,7 @@ def main():
             continue
 
     print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
-    print("🔥 Запуск 12-кратного максимального стресс-теста (10 потоков)...")
+    print("🔥 Запуск 12-кратного стресс-теста...")
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -303,7 +300,6 @@ def main():
             ]
         }
 
-    # 2. Генерация auto_eu.json (🇪🇺 Авто)
     eu_nodes = [n for n in valid_nodes if any(c in n["name"] for c in ["Германия", "Нидерланды", "Франция", "Финляндия", "Швеция", "Польша"])]
     if not eu_nodes:
         eu_nodes = valid_nodes
@@ -312,7 +308,6 @@ def main():
     with open("auto_eu.json", "w", encoding="utf-8") as f:
         json.dump(balancer_eu, f, indent=2, ensure_ascii=False)
         
-    # 3. Генерация 5 файлов белых списков (🇷🇺 Авто БС - 1..5)
     chunk_size = max(1, len(valid_nodes) // 5)
     for i in range(1, 6):
         chunk = valid_nodes[(i-1)*chunk_size : i*chunk_size]
@@ -323,7 +318,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Все файлы сгенерированы успешно без ошибок.")
+    print("Все файлы успешно сгенерированы.")
 
 if __name__ == "__main__":
     main()
