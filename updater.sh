@@ -11,6 +11,9 @@ from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SOURCES = [
+    # Ваш личный проверенный источник
+    "https://raw.githubusercontent.com/qw1ls/Happ-V2Ray---qwilsVPN/refs/heads/main/qwilsVPNall.txt",
+    # Остальные публичные источники
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
@@ -74,45 +77,29 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# УСИЛЕННЫЙ СТРЕСС-ТЕСТ: 6 проходов, строгий контроль пинга и стабильности
-def check_node_heavy_brute(node):
-    latencies = []
+# Адекватная проверка: убираем только те, у которых пинг больше 1000мс или которые мертвы
+def check_node_soft(node):
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        for _ in range(6):
-            start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=4.0) as sock:
-                with ctx.wrap_socket(sock, server_hostname=node["sni"]) as ssock:
-                    request_data = f"GET / HTTP/1.1\r\nHost: {node['sni']}\r\nConnection: close\r\n\r\n".encode('utf-8')
-                    ssock.sendall(request_data)
-                    ssock.recv(64)
-            latencies.append(time.time() - start_time)
-            time.sleep(0.01)
-            
-        avg_latency = sum(latencies) / len(latencies)
-        
-        # Отсекаем всё, что медленнее 150мс или сильно «плавает» по пингу
-        if avg_latency > 0.15 or (max(latencies) - min(latencies) > 0.8):
-            return False, 0.0
-            
-        return True, avg_latency
+        start_time = time.time()
+        with socket.create_connection((node["address"], node["port"]), timeout=4.0) as sock:
+            latency = time.time() - start_time
+            # Порог 1.0 сек (1000мс): если дольше — убираем, всё что быстрее — оставляем
+            if latency > 1.0:
+                return False, 0.0
+            return True, latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка сырых конфигов...")
+    print("Загрузка ссылок со всех источников...")
     raw_links = fetch_sources()
-    print(f"Собрано ссылок: {len(raw_links)}")
+    print(f"Собрано сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
     
     for link in raw_links:
         try:
-            # Очистка мусора после хеша
             for sep in ["%23", "#"]:
                 if sep in link:
                     link = link.split(sep)[0]
@@ -136,7 +123,6 @@ def main():
             if net_type not in ["tcp", "ws", "grpc", "xhttp"]:
                 net_type = "tcp"
 
-            # Точное определение страны
             name_decoded = unquote(parsed.fragment) if parsed.fragment else ""
             full_text = f"{name_decoded} {parsed.path} {parsed.hostname}".upper()
             
@@ -177,7 +163,6 @@ def main():
             elif net_type == "xhttp":
                 node["path"] = query.get("path", ["/"])[0]
             
-            # Строго валидная сборка query без лишнего мусора
             clean_query = f"security={security}&type={net_type}&encryption=none&sni={node['sni']}&fp={node['fp']}"
             if security == "reality":
                 clean_query += f"&pbk={node.get('pbk','')}&sid={node.get('sid','')}&spx=/"
@@ -194,12 +179,11 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод отправлено на усиленный стресс-тест: {len(parsed_nodes)}")
+    print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
     
     valid_nodes = []
-    # Потоки снижены до 15 для максимальной стабильности соединений при глубокой проверке
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = {executor.submit(check_node_heavy_brute, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {executor.submit(check_node_soft, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -211,7 +195,7 @@ def main():
                 pass
 
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Реально рабочих и быстрых нод отобрано: {len(valid_nodes)}")
+    print(f"💎 Успешно отобрано рабочих нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -221,13 +205,12 @@ def main():
             "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls&encryption=none#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
         }]
 
-    # Запись подписки с уникальным таймстампом
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
     current_timestamp = int(time.time())
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write(f"#profile-title: base64:qwils HEAVY UPDATE {current_timestamp}\n")
+        f.write(f"#profile-title: base64:qwils UPDATE {current_timestamp}\n")
         f.write(encoded_sub)
 
     os.makedirs(".", exist_ok=True)
@@ -262,7 +245,7 @@ def main():
     def make_balancer(nodes_chunk, balancer_name):
         outbounds = []
         balancer_targets = []
-        for i, node in enumerate(nodes_chunk[:25]):
+        for i, node in enumerate(nodes_chunk[:30]):
             tag = f"proxy_{i}"
             balancer_targets.append(tag)
             outbound = {
@@ -328,10 +311,10 @@ def main():
             chunk = valid_nodes
             
         balancer_bs = make_balancer(chunk, f"🇷🇺 Авто БС - {i}")
-        with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
+        with open(fawename := f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Глубокая проверка завершена, файлы записаны идеально.")
+    print("Все файлы сгенерированы успешно.")
 
 if __name__ == "__main__":
     main()
