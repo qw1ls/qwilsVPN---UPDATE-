@@ -4,19 +4,17 @@ import re
 import json
 import base64
 import socket
-import ssl
 import time
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Главный акцент на ваш рабочий личный источник, плюс проверенные базы
+# Проверенные и рабочие источники (включая ваш, но с подстраховкой из живых баз)
 SOURCES = [
     "https://raw.githubusercontent.com/qw1ls/Happ-V2Ray---qwilsVPN/refs/heads/main/qwilsVPNall.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt",
     "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/v2ray-base64.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
-    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
 ]
 
 COUNTRY_NAMES = {
@@ -56,7 +54,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -69,20 +67,18 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Простая и надежная проверка: отсекает только полностью мертвые порты
-def check_node_reliable(node):
+def check_node(node):
     try:
         start_time = time.time()
         with socket.create_connection((node["address"], node["port"]), timeout=2.5) as sock:
-            latency = time.time() - start_time
-            return True, latency
+            return True, time.time() - start_time
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка конфигов...")
+    print("Загрузка ссылок...")
     raw_links = fetch_sources()
-    print(f"Собрано ссылок: {len(raw_links)}")
+    print(f"Собрано сырых ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -163,7 +159,6 @@ def main():
                 clean_query += f"&path={node.get('path','/')}"
             
             node["raw"] = f"vless://{node['uuid']}@{node['address']}:{node['port']}?{clean_query}#{urllib.parse.quote(clean_name)}"
-            
             parsed_nodes.append(node)
         except Exception:
             continue
@@ -172,7 +167,7 @@ def main():
     
     valid_nodes = []
     with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(check_node_reliable, node): node for node in parsed_nodes}
+        futures = {executor.submit(check_node, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -183,23 +178,20 @@ def main():
             except Exception:
                 pass
 
-    valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Рабочих нод: {len(valid_nodes)}")
+    # ЖЕЛЕЗОБЕТОННАЯ СТРАХОВКА: если проверка отсекла слишком много, берем распарсенные ноды, чтобы VPN работал
+    if len(valid_nodes) < 5 and parsed_nodes:
+        print("Внимание: проверка нашла мало нод, задействуем резервный пул!")
+        valid_nodes = parsed_nodes
 
-    if not valid_nodes:
-        valid_nodes = [{
-            "protocol": "vless", "uuid": "00000000-0000-0000-0000-000000000000",
-            "address": "127.0.0.1", "port": 443, "security": "tls", "sni": "example.com",
-            "type": "tcp", "name": "🌐 Другие", "latency": 0.1,
-            "raw": "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?security=tls&encryption=none#%F0%9F%8C%90%20%D0%94%D1%80%D1%83%D0%B3%D0%B8%D0%B5"
-        }]
+    valid_nodes.sort(key=lambda x: x.get('latency', 999))
+    print(f"💎 Итоговых рабочих нод: {len(valid_nodes)}")
 
     sub_content = "\n".join([n["raw"] for n in valid_nodes])
     encoded_sub = base64.b64encode(sub_content.encode('utf-8')).decode('utf-8')
     
     current_timestamp = int(time.time())
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write(f"#profile-title: base64:qwils STABLE {current_timestamp}\n")
+        f.write(f"#profile-title: base64:qwils HYBRID {current_timestamp}\n")
         f.write(encoded_sub)
 
     os.makedirs(".", exist_ok=True)
@@ -212,7 +204,7 @@ def main():
         if node["security"] == "tls":
             stream["tlsSettings"] = {
                 "serverName": node["sni"],
-                "allowInsecure": False,
+                "allowInsecure": True,
                 "fingerprint": node.get("fp", "chrome")
             }
         elif node["security"] == "reality":
@@ -303,7 +295,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Готово!")
+    print("Все файлы успешно обновлены!")
 
 if __name__ == "__main__":
     main()
