@@ -10,21 +10,14 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Ваши надежные источники + публичные базы
+# Главный акцент на ваш рабочий личный источник, плюс проверенные базы
 SOURCES = [
     "https://raw.githubusercontent.com/qw1ls/Happ-V2Ray---qwilsVPN/refs/heads/main/qwilsVPNall.txt",
-    "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
-    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
-    "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/blacklist_all.txt",
-    "https://raw.githubusercontent.com/wlunlocker/vpn-configs/refs/heads/main/whitelist_all.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-Config/refs/heads/main/Sub1.txt",
     "https://raw.githubusercontent.com/Au1rxx/free-vpn-subscriptions/main/output/v2ray-base64.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
+    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/refs/heads/main/all/configs.txt",
 ]
-
-for i in range(1, 26):
-    SOURCES.append(f"https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/{i}.txt")
 
 COUNTRY_NAMES = {
     "NL": ("🇳🇱", "Нидерланды"),
@@ -63,7 +56,7 @@ def fetch_sources():
     for url in SOURCES:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
                 if "vless://" not in content:
                     try:
@@ -76,30 +69,20 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# ЖЕСТКАЯ, НО СПРАВЕДЛИВАЯ ПРОВЕРКА (отсекает мертвых и тормозных > 600мс)
-def check_node_strict(node):
-    latencies = []
+# Простая и надежная проверка: отсекает только полностью мертвые порты
+def check_node_reliable(node):
     try:
-        for _ in range(2): # Двойной проход для надежности
-            start_time = time.time()
-            with socket.create_connection((node["address"], node["port"]), timeout=3.5) as sock:
-                latencies.append(time.time() - start_time)
-            time.sleep(0.05)
-            
-        avg_latency = sum(latencies) / len(latencies)
-        
-        # Если средний пинг больше 600мс — узел бракуется как медленный мусор
-        if avg_latency > 0.6:
-            return False, 0.0
-            
-        return True, avg_latency
+        start_time = time.time()
+        with socket.create_connection((node["address"], node["port"]), timeout=2.5) as sock:
+            latency = time.time() - start_time
+            return True, latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка и парсинг всех источников...")
+    print("Загрузка конфигов...")
     raw_links = fetch_sources()
-    print(f"Собрано сырых ссылок: {len(raw_links)}")
+    print(f"Собрано ссылок: {len(raw_links)}")
     
     parsed_nodes = []
     seen_endpoints = set()
@@ -185,11 +168,11 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод для жесткой проверки: {len(parsed_nodes)}")
+    print(f"Проверка нод: {len(parsed_nodes)}")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        futures = {executor.submit(check_node_strict, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {executor.submit(check_node_reliable, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -200,9 +183,8 @@ def main():
             except Exception:
                 pass
 
-    # Сортировка: самые быстрые (с минимальным пингом) строго сверху
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Прошли строгий отбор (пинг < 600мс): {len(valid_nodes)}")
+    print(f"💎 Рабочих нод: {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -217,7 +199,7 @@ def main():
     
     current_timestamp = int(time.time())
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write(f"#profile-title: base64:qwils STRICT UPDATE {current_timestamp}\n")
+        f.write(f"#profile-title: base64:qwils STABLE {current_timestamp}\n")
         f.write(encoded_sub)
 
     os.makedirs(".", exist_ok=True)
@@ -321,7 +303,7 @@ def main():
         with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
-    print("Все файлы сгенерированы успешно.")
+    print("Готово!")
 
 if __name__ == "__main__":
     main()
