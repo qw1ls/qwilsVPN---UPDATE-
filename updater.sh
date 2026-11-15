@@ -10,10 +10,9 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Ваши надежные источники + публичные базы
 SOURCES = [
-    # Ваш личный проверенный источник
     "https://raw.githubusercontent.com/qw1ls/Happ-V2Ray---qwilsVPN/refs/heads/main/qwilsVPNall.txt",
-    # Остальные публичные источники
     "https://fastly.jsdelivr.net/gh/whoahaow/rjsxrd@main/githubmirror/bypass/bypass-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_SS%2BAll_RUS.txt",
@@ -77,21 +76,28 @@ def fetch_sources():
             pass
     return list(set(all_links))
 
-# Адекватная проверка: убираем только те, у которых пинг больше 1000мс или которые мертвы
-def check_node_soft(node):
+# ЖЕСТКАЯ, НО СПРАВЕДЛИВАЯ ПРОВЕРКА (отсекает мертвых и тормозных > 600мс)
+def check_node_strict(node):
+    latencies = []
     try:
-        start_time = time.time()
-        with socket.create_connection((node["address"], node["port"]), timeout=4.0) as sock:
-            latency = time.time() - start_time
-            # Порог 1.0 сек (1000мс): если дольше — убираем, всё что быстрее — оставляем
-            if latency > 1.0:
-                return False, 0.0
-            return True, latency
+        for _ in range(2): # Двойной проход для надежности
+            start_time = time.time()
+            with socket.create_connection((node["address"], node["port"]), timeout=3.5) as sock:
+                latencies.append(time.time() - start_time)
+            time.sleep(0.05)
+            
+        avg_latency = sum(latencies) / len(latencies)
+        
+        # Если средний пинг больше 600мс — узел бракуется как медленный мусор
+        if avg_latency > 0.6:
+            return False, 0.0
+            
+        return True, avg_latency
     except Exception:
         return False, 0.0
 
 def main():
-    print("Загрузка ссылок со всех источников...")
+    print("Загрузка и парсинг всех источников...")
     raw_links = fetch_sources()
     print(f"Собрано сырых ссылок: {len(raw_links)}")
     
@@ -179,11 +185,11 @@ def main():
         except Exception:
             continue
 
-    print(f"Уникальных нод для проверки: {len(parsed_nodes)}")
+    print(f"Уникальных нод для жесткой проверки: {len(parsed_nodes)}")
     
     valid_nodes = []
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(check_node_soft, node): node for node in parsed_nodes}
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        futures = {executor.submit(check_node_strict, node): node for node in parsed_nodes}
         for future in as_completed(futures):
             node = futures[future]
             try:
@@ -194,8 +200,9 @@ def main():
             except Exception:
                 pass
 
+    # Сортировка: самые быстрые (с минимальным пингом) строго сверху
     valid_nodes.sort(key=lambda x: x.get('latency', 999))
-    print(f"💎 Успешно отобрано рабочих нод: {len(valid_nodes)}")
+    print(f"💎 Прошли строгий отбор (пинг < 600мс): {len(valid_nodes)}")
 
     if not valid_nodes:
         valid_nodes = [{
@@ -210,7 +217,7 @@ def main():
     
     current_timestamp = int(time.time())
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write(f"#profile-title: base64:qwils UPDATE {current_timestamp}\n")
+        f.write(f"#profile-title: base64:qwils STRICT UPDATE {current_timestamp}\n")
         f.write(encoded_sub)
 
     os.makedirs(".", exist_ok=True)
@@ -311,7 +318,7 @@ def main():
             chunk = valid_nodes
             
         balancer_bs = make_balancer(chunk, f"🇷🇺 Авто БС - {i}")
-        with open(fawename := f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
+        with open(f"auto_bs_{i}.json", "w", encoding="utf-8") as f:
             json.dump(balancer_bs, f, indent=2, ensure_ascii=False)
 
     print("Все файлы сгенерированы успешно.")
