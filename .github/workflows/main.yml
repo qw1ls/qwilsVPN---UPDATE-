@@ -2,8 +2,8 @@ name: Auto Update VPN Subscription
 
 on:
   schedule:
-    - cron: '0 3 * * *'
-  workflow_dispatch:
+    - cron: '0 3 * * *' # Запуск каждый день в 3 часа ночи
+  workflow_dispatch: # Позволяет запускать вручную кнопкой в GitHub
 
 jobs:
   update:
@@ -18,12 +18,12 @@ jobs:
           python-version: '3.10'
 
       - name: Run updater script
-        run: python3 updater.sh
+        run: python3 update_subs.py
 
       - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add subscription.txt *.json
-          git commit -m "Automated update: Checked VPN nodes and JSON balancers" || exit 0
+          git add sub.txt
+          git commit -m "Automated update: Checked VPN nodes" || exit 0
           git push
