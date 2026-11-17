@@ -22,9 +22,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Install Xray core
+      - name: Install Xray core explicitly
         run: |
-          bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+          # Скачиваем официальный релиз Xray и распаковываем в текущую папку
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip xray -d .
+          chmod +x ./xray
+          # Добавляем текущую директорию в PATH, чтобы скрипт видел xray
+          echo "$PWD" >> $GITHUB_PATH
 
       - name: Run updater script
         run: python3 update_subs.py
