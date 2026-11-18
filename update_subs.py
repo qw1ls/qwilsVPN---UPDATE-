@@ -8,7 +8,6 @@ import socket
 import subprocess
 import tempfile
 import signal
-import statistics
 import threading
 import re
 import random
@@ -21,7 +20,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import ipaddress
 
-# Настройки таймаутов и проверок
 TIMEOUT_PER_URL = 6
 MAX_TCP_PING_MS = 600
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
@@ -31,7 +29,6 @@ OUTPUT_FILE = "sub.txt"
 README_FILE = "README.md"
 IP_BLACKLIST_FILE = "ip_blacklist.txt"
 
-# 6 заблокированных сайтов для жесткой проверки работоспособности нод
 TEST_URLS = [
     "https://www.instagram.com",
     "https://discord.com",
@@ -112,8 +109,7 @@ def prefetch_countries_batch(hosts):
     with ThreadPoolExecutor(max_workers=20) as ex:
         list(ex.map(get_country, hosts))
     print("✅ Локации успешно определены.")
-
-def load_black_list():
+    def load_black_list():
     global STATIC_IP_BLACKLIST
     if os.path.exists(IP_BLACKLIST_FILE):
         with open(IP_BLACKLIST_FILE, "r") as f:
@@ -280,65 +276,74 @@ def _stop_xray(proc, path):
     if path and os.path.exists(path):
         try: os.unlink(path)
         except OSError: pass
-            def test_single_config(line):
-    original = line.strip()
-    hp = extract_host_port(original)
-    if not hp: return None
-    host, port = hp
-    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0: return None
-    if is_ip_blacklisted(host): return None
+            with open(README_FILE, "w", encoding="utf-8") as f:
+        f.write(readme_content)
+
+def main():
+    load_black_list()
     
-    ping = tcp_ping(host, port)
-    if ping is None or ping > 600:
-        return None
-        
-    outbound = _line_to_outbound(original)
-    if not outbound: return None
-    socks_port = get_free_port()
-    proc, cfg = _spawn_xray(outbound, socks_port)
-    if not proc: return None
-    
+    print("📥 Загрузка источников...")
+    raw_configs = set()
     try:
-        if not wait_for_port(socks_port):
-            return None
-            
-        proxies = {"http": f"socks5://127.0.0.1:{socks_port}", "https": f"socks5://127.0.0.1:{socks_port}"}
-        success_count = 0
+        r = _session.get(SOURCES_LIST_URL, timeout=10)
+        if r.status_code == 200:
+            urls = [line.strip() for line in r.text.splitlines() if line.strip() and not line.startswith("#")]
+            for url in urls:
+                try:
+                    resp = _session.get(url, timeout=10)
+                    if resp.status_code == 200:
+                        content = resp.text
+                        try:
+                            decoded = base64.b64decode(content + "===").decode('utf-8', errors='ignore')
+                            if "://" in decoded: content = decoded
+                        except Exception: pass
+                        found = re.findall(r'((?:vless|vmess|trojan|ss)://[^\s<"]+)', content)
+                        for cfg in found: raw_configs.add(cfg)
+                except Exception: continue
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки списка источников: {e}")
+
+    configs_list = list(raw_configs)
+    print(f"🔎 Найдено уникальных конфигов: {len(configs_list)}. Запуск жесткой проверки по заблокированным сайтам...")
+    
+    valid_nodes = []
+    hosts_to_check = [extract_host_port(c)[0] for c in configs_list if extract_host_port(c)]
+    prefetch_countries_batch(hosts_to_check)
+    
+    with ThreadPoolExecutor(max_workers=40) as executor:
+        futures = {executor.submit(test_single_config, cfg): cfg for cfg in configs_list}
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                cfg, host = res
+                country, flag = get_country(host)
+                valid_nodes.append((country, flag, cfg))
+                
+    print(f"✅ Прошли строгую проверку: {len(valid_nodes)} нод.")
+    
+    country_groups = {}
+    for country, flag, cfg in valid_nodes:
+        key = (country, flag)
+        if key not in country_groups: country_groups[key] = []
+        country_groups[key].append(cfg)
         
-        for url in TEST_URLS:
-            try:
-                r = _session.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
-                if r.status_code == 200:
-                    success_count += 1
-                    if success_count >= 2:
-                        return original, host
-            except Exception:
-                continue
-        return None
-    except Exception:
-        return None
-    finally:
-        _stop_xray(proc, cfg)
+    final_configs = []
+    time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
+    
+    for (country, flag), nodes in country_groups.items():
+        for idx, url in enumerate(nodes[:5]):  # Топ-5 нод на каждую страну
+            base_url = url.split('#')[0]
+            node_name = f"{flag} {country} ({idx+1})"
+            full_name = unquote(f"{node_name} | @qw1lsVPN FREE | {time_str}")
+            final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
+            
+    encoded_sub = base64.b64encode("\n".join(final_configs).encode('utf-8')).decode('utf-8')
+    
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(encoded_sub)
+        
+    update_readme(len(final_configs))
+    print(f"🎉 Готово! Файл подписки сохранен в {OUTPUT_FILE}")
 
-def update_readme(total_nodes):
-    msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
-    readme_content = f"""# @qw1lsVPN FREE
-
-⚡ **Автоматическая подписка на рабочие VLESS/VMess/Trojan ноды**  
-Обновляется регулярно через GitHub Actions. Без рекламы и ограничений.
-
----
-
-### 📊 Статус:
-* **Активных серверов:** `{total_nodes}`
-* **Последнее обновление:** `{msk_time}`
-
----
-
-### 🔗 Ссылка на подписку:
-Добавьте эту ссылку в свой клиент (**Hiddify**, **NekoBox**, **v2rayNG**):
-
-```text
-[https://raw.githubusercontent.com/bobrinaw/vlessforu/main/sub.txt](https://raw.githubusercontent.com/bobrinaw/vlessforu/main/sub.txt)
 if __name__ == "__main__":
     main()
