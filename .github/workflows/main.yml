@@ -40,5 +40,5 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git status
           git add sub.txt README.md
-          git commit -m "Automated update: Checked VPN nodes" || echo "No changes to commit"
-          git push
+          git commit -m "Auto-update subscription files" || echo "No changes to commit"
+          git push origin main
