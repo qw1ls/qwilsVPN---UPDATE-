@@ -9,7 +9,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Явно даем права на запись в репозиторий
+      contents: write # Даем боту права на запись в репозиторий
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
