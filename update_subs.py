@@ -24,8 +24,13 @@ TIMEOUT_PER_URL = 6
 MAX_TCP_PING_MS = 600
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
 
-# Твоя правильная сырая ссылка на sources.txt
 SOURCES_LIST_URL = "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt"
+WHITELIST_SOURCES = [
+    "https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt"
+]
+
 OUTPUT_FILE = "sub.txt"
 README_FILE = "README.md"
 IP_BLACKLIST_FILE = "ip_blacklist.txt"
@@ -110,7 +115,8 @@ def prefetch_countries_batch(hosts):
     with ThreadPoolExecutor(max_workers=20) as ex:
         list(ex.map(get_country, hosts))
     print("✅ Локации успешно определены.")
-    def load_black_list():
+
+def load_black_list():
     global STATIC_IP_BLACKLIST
     if os.path.exists(IP_BLACKLIST_FILE):
         with open(IP_BLACKLIST_FILE, "r") as f:
@@ -277,7 +283,8 @@ def _stop_xray(proc, path):
     if path and os.path.exists(path):
         try: os.unlink(path)
         except OSError: pass
-            def test_single_config(line):
+
+def test_single_config(line):
     original = line.strip()
     hp = extract_host_port(original)
     if not hp: return None
@@ -308,98 +315,128 @@ def _stop_xray(proc, path):
                 if r.status_code == 200:
                     success_count += 1
                     if success_count >= 2:
-                        return original, host
+                        return original, host, ping
             except Exception:
                 continue
         return None
     except Exception:
         return None
     finally:
-        _stop_xray(proc, cfg)
-
-def update_readme(total_nodes):
+      _stop_xray(proc, cfg)
+        def update_readme(total_nodes):
     msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
-    readme_content = f"""# @qw1lsVPN FREE
+    readme_content = (
+        "# @qw1lsVPN FREE\n\n"
+        "⚡ **Автоматическая подписка на рабочие VLESS/VMess/Trojan ноды**\n"
+        "Обновляется регулярно через GitHub Actions. Без рекламы и ограничений.\n\n"
+        "---\n\n"
+        "### 📊 Статус:\n"
+        f"* **Активных серверов:** `{total_nodes}`\n"
+        f"* **Последнее обновление:** `{msk_time}`\n\n"
+        "---\n\n"
+        "### 🔗 Ссылка на подписку:\n"
+        "Добавьте эту ссылку в свой клиент (**Hiddify**, **NekoBox**, **v2rayNG**):\n\n"
+        "```text\n"
+        "[https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt](https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt)\n"
+        "```\n"
+    )
+    with open(README_FILE, "w", encoding="utf-8") as f:
+        f.write(readme_content)
 
-⚡ **Автоматическая подписка на рабочие VLESS/VMess/Trojan ноды**  
-Обновляется регулярно через GitHub Actions. Без рекламы и ограничений.
+def fetch_configs_from_url(url):
+    configs = set()
+    try:
+        resp = _session.get(url, timeout=10)
+        if resp.status_code == 200:
+            content = resp.text
+            try:
+                decoded = base64.b64decode(content + "===").decode('utf-8', errors='ignore')
+                if "://" in decoded: content = decoded
+            except Exception: pass
+            found = re.findall(r'((?:vless|vmess|trojan|ss)://[^\s<"]+)', content)
+            for cfg in found: configs.add(cfg)
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки {url}: {e}")
+    return configs
 
----
-
-### 📊 Статус:
-* **Активных серверов:** `{total_nodes}`
-* **Последнее обновление:** `{msk_time}`
-
----
-
-### 🔗 Ссылка на подписку:
-Добавьте эту ссылку в свой клиент (**Hiddify**, **NekoBox**, **v2rayNG**):
-
-```text
-[https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt](https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt)
-    def main():
+def main():
     load_black_list()
     
-    print("📥 Загрузка источников из sources.txt...")
-    raw_configs = set()
+    print("📥 Загрузка основных источников из sources.txt...")
+    main_raw_configs = set()
     try:
         r = _session.get(SOURCES_LIST_URL, timeout=10)
         if r.status_code == 200:
             urls = [line.strip() for line in r.text.splitlines() if line.strip() and not line.startswith("#")]
             for url in urls:
-                try:
-                    resp = _session.get(url, timeout=10)
-                    if resp.status_code == 200:
-                        content = resp.text
-                        try:
-                            decoded = base64.b64decode(content + "===").decode('utf-8', errors='ignore')
-                            if "://" in decoded: content = decoded
-                        except Exception: pass
-                        found = re.findall(r'((?:vless|vmess|trojan|ss)://[^\s<"]+)', content)
-                        for cfg in found: raw_configs.add(cfg)
-                except Exception: continue
+                main_raw_configs.update(fetch_configs_from_url(url))
     except Exception as e:
         print(f"⚠️ Ошибка загрузки списка источников: {e}")
 
-    configs_list = list(raw_configs)
-    print(f"🔎 Найдено уникальных конфигов: {len(configs_list)}. Запуск жесткой проверки по заблокированным сайтам...")
+    print("📥 Загрузка специальных белых списков (White List)...")
+    whitelist_raw_configs = set()
+    for wl_url in WHITELIST_SOURCES:
+        whitelist_raw_configs.update(fetch_configs_from_url(wl_url))
+
+    all_configs = main_raw_configs.union(whitelist_raw_configs)
+    print(f"🔎 Найдено уникальных конфигов: {len(all_configs)}. Запуск жесткой проверки по заблокированным сайтам...")
     
     valid_nodes = []
-    hosts_to_check = [extract_host_port(c)[0] for c in configs_list if extract_host_port(c)]
+    whitelist_valid = set()
+    
+    hosts_to_check = [extract_host_port(c)[0] for c in all_configs if extract_host_port(c)]
     prefetch_countries_batch(hosts_to_check)
     
     with ThreadPoolExecutor(max_workers=40) as executor:
-        futures = {executor.submit(test_single_config, cfg): cfg for cfg in configs_list}
+        futures = {executor.submit(test_single_config, cfg): cfg for cfg in all_configs}
         for future in as_completed(futures):
             res = future.result()
             if res:
-                cfg, host = res
+                cfg, host, ping = res
                 country, flag = get_country(host)
-                valid_nodes.append((country, flag, cfg))
+                valid_nodes.append((country, flag, cfg, ping))
+                if cfg in whitelist_raw_configs:
+                    whitelist_valid.add(cfg)
                 
-    print(f"✅ Прошли строгую проверку: {len(valid_nodes)} нод.")
+    print(f"✅ Прошли строгую проверку: {len(valid_nodes)} серверов.")
     
-    country_groups = {}
-    for country, flag, cfg in valid_nodes:
-        key = (country, flag)
-        if key not in country_groups: country_groups[key] = []
-        country_groups[key].append(cfg)
-        
+    if not valid_nodes:
+        print("❌ Нет рабочих серверов!")
+        return
+
+    non_wl_nodes = [n for n in valid_nodes if n[2] not in whitelist_valid]
+    best_node = min(non_wl_nodes if non_wl_nodes else valid_nodes, key=lambda x: x[3])
+    
     final_configs = []
     time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
     
-    is_first_node = True
+    # 1. Самый первый сервер — лидер с пингом (Флаг первый)
+    b_country, b_flag, b_cfg, b_ping = best_node
+    b_base_url = b_cfg.split('#')[0]
+    best_name = f"{b_flag} ⚡ {b_country} ({int(b_ping)}ms)"
+    best_full_name = unquote(f"{best_name} | @qw1lsVPN FREE | {time_str}")
+    final_configs.append(f"{b_base_url}#{urlparse(f'/?{best_full_name}').path or best_full_name}")
     
+    # 2. Ноды из белых списков с флагом ЕС и описанием
+    for country, flag, cfg, ping in valid_nodes:
+        if cfg in whitelist_valid and cfg != b_cfg:
+            base_url = cfg.split('#')[0]
+            node_name = f"🇪🇺 White List"
+            full_name = unquote(f"{node_name} | white list при крайних случаях! | @qw1lsVPN FREE | {time_str}")
+            final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
+
+    # 3. Остальные обычные сервера по странам (без номеров, флаг первый)
+    country_groups = {}
+    for country, flag, cfg, ping in valid_nodes:
+        if cfg not in whitelist_valid and cfg != b_cfg:
+            key = (country, flag)
+            if key not in country_groups: country_groups[key] = []
+            country_groups[key].append((cfg, ping))
+        
     for (country, flag), nodes in country_groups.items():
-        for idx, url in enumerate(nodes[:5]):  # Топ-5 нод на каждую страну
-            base_url = url.split('#')[0]
-            
-            if is_first_node:
-                node_name = f"⚡ {flag} {country} (Best)"
-                is_first_node = False
-            else:
-                node_name = f"{flag} {country} ({idx+1})"
-                
+        for cfg, ping in nodes:
+            base_url = cfg.split('#')[0]
+            node_name = f"{flag} {country}"
             full_name = unquote(f"{node_name} | @qw1lsVPN FREE | {time_str}")
             final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
             
@@ -413,3 +450,5 @@ def update_readme(total_nodes):
 
 if __name__ == "__main__":
     main()
+        
+        
