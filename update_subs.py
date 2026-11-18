@@ -16,9 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import ipaddress
 
-# Настройки скорости и таймаутов
 TIMEOUT_PER_URL = 3
 MAX_TCP_PING_MS = 350
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
@@ -73,7 +71,6 @@ def get_country(host):
     ip = resolve_host(host) or host
     if not ip: return "Другие", "🌍"
     if ip in country_cache: return country_cache[ip]
-    
     try:
         r = _session.get(f"http://ip-api.com/json/{ip}?fields=status,country,countryCode", timeout=2)
         if r.status_code == 200:
@@ -86,13 +83,11 @@ def get_country(host):
                 return val
     except Exception:
         pass
-        
     res = ("Другие", "🌍")
     country_cache[ip] = res
     return res
 
 def prefetch_countries_batch(hosts):
-    print(f"🌍 Определение локаций ({len(hosts)} серверов)...")
     with ThreadPoolExecutor(max_workers=30) as ex:
         list(ex.map(get_country, hosts))
 
@@ -149,7 +144,6 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     sni = query.get("sni", query.get("host", [fallback_host]))[0]
     fp = query.get("fp", [""])[0]
     stream = {"network": network}
-    
     if security == "reality":
         stream["security"] = "reality"
         stream["realitySettings"] = {
@@ -160,7 +154,6 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     elif security == "tls":
         stream["security"] = "tls"
         stream["tlsSettings"] = {"serverName": sni, "fingerprint": fp or "chrome", "allowInsecure": False}
-        
     if network == "ws":
         stream["wsSettings"] = {"path": query.get("path", ["/"])[0], "headers": {"Host": query.get("host", [sni])[0]}}
     elif network == "grpc":
@@ -250,8 +243,7 @@ def test_single_config(line):
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0: return None
     
     ping = tcp_ping(host, port)
-    if ping is None or ping > MAX_TCP_PING_MS:
-        return None
+    if ping is None or ping > MAX_TCP_PING_MS: return None
         
     outbound = _line_to_outbound(original)
     if not outbound: return None
@@ -260,22 +252,16 @@ def test_single_config(line):
     if not proc: return None
     
     try:
-        if not wait_for_port(socks_port):
-            return None
-            
+        if not wait_for_port(socks_port): return None
         proxies = {"http": f"socks5://127.0.0.1:{socks_port}", "https": f"socks5://127.0.0.1:{socks_port}"}
         for url in TEST_URLS:
             try:
                 r = _session.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
-                if r.status_code == 200:
-                    return original, host, ping
-            except Exception:
-                continue
+                if r.status_code == 200: return original, host, ping
+            except Exception: continue
         return None
-    except Exception:
-        return None
-    finally:
-        _stop_xray(proc, cfg)
+    except Exception: return None
+    finally: _stop_xray(proc, cfg)
 
 def update_readme(total_nodes):
     msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
@@ -344,8 +330,12 @@ def main():
                 if cfg in whitelist_raw_configs:
                     whitelist_valid.add(cfg)
                 
+    # ГАРАНТИЯ СОЗДАНИЯ ФАЙЛОВ: Если нод вдруг нет, пишем пустую заглушку, чтобы Git не падал с ошибкой 128
     if not valid_nodes:
-        print("❌ Нет рабочих серверов!")
+        print("⚠️ Рабочие серверы не найдены, создаем пустой файл подписки.")
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(base64.b64encode(b"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?type=tcp&security=none#%E2%9D%8C+%D0%9D%D0%B5%D1%82+%D1%81%D0%B5%D1%80%D0%B2%D0%B5%D1%80%D0%BE%D0%B2")).decode('utf-8')
+        update_readme(0)
         return
 
     non_wl_nodes = [n for n in valid_nodes if n[2] not in whitelist_valid]
@@ -395,4 +385,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
