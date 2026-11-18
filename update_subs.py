@@ -322,8 +322,9 @@ def test_single_config(line):
     except Exception:
         return None
     finally:
-      _stop_xray(proc, cfg)
-        def update_readme(total_nodes):
+        _stop_xray(proc, cfg)
+
+def update_readme(total_nodes):
     msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
     readme_content = (
         "# @qw1lsVPN FREE\n\n"
@@ -409,12 +410,13 @@ def main():
     
     final_configs = []
     time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
+    total_count = len(valid_nodes)
     
-    # 1. Самый первый сервер — лидер с пингом (Флаг первый)
+    # 1. Самый первый сервер — лидер с пингом
     b_country, b_flag, b_cfg, b_ping = best_node
     b_base_url = b_cfg.split('#')[0]
     best_name = f"{b_flag} ⚡ {b_country} ({int(b_ping)}ms)"
-    best_full_name = unquote(f"{best_name} | @qw1lsVPN FREE | {time_str}")
+    best_full_name = unquote(f"{best_name} | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
     final_configs.append(f"{b_base_url}#{urlparse(f'/?{best_full_name}').path or best_full_name}")
     
     # 2. Ноды из белых списков с флагом ЕС и описанием
@@ -422,10 +424,10 @@ def main():
         if cfg in whitelist_valid and cfg != b_cfg:
             base_url = cfg.split('#')[0]
             node_name = f"🇪🇺 White List"
-            full_name = unquote(f"{node_name} | white list при крайних случаях! | @qw1lsVPN FREE | {time_str}")
+            full_name = unquote(f"{node_name} | white list при крайних случаях! | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
             final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
 
-    # 3. Остальные обычные сервера по странам (без номеров, флаг первый)
+    # 3. Остальные обычные сервера по странам
     country_groups = {}
     for country, flag, cfg, ping in valid_nodes:
         if cfg not in whitelist_valid and cfg != b_cfg:
@@ -437,7 +439,7 @@ def main():
         for cfg, ping in nodes:
             base_url = cfg.split('#')[0]
             node_name = f"{flag} {country}"
-            full_name = unquote(f"{node_name} | @qw1lsVPN FREE | {time_str}")
+            full_name = unquote(f"{node_name} | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
             final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
             
     encoded_sub = base64.b64encode("\n".join(final_configs).encode('utf-8')).decode('utf-8')
