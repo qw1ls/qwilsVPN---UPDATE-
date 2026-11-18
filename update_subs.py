@@ -24,7 +24,8 @@ TIMEOUT_PER_URL = 6
 MAX_TCP_PING_MS = 600
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
 
-SOURCES_LIST_URL = "https://raw.githubusercontent.com/bobrinaw/vlessforu/main/lol"
+# Твоя правильная сырая ссылка на sources.txt
+SOURCES_LIST_URL = "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt"
 OUTPUT_FILE = "sub.txt"
 README_FILE = "README.md"
 IP_BLACKLIST_FILE = "ip_blacklist.txt"
@@ -276,13 +277,70 @@ def _stop_xray(proc, path):
     if path and os.path.exists(path):
         try: os.unlink(path)
         except OSError: pass
-            with open(README_FILE, "w", encoding="utf-8") as f:
-        f.write(readme_content)
+            def test_single_config(line):
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp: return None
+    host, port = hp
+    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0: return None
+    if is_ip_blacklisted(host): return None
+    
+    ping = tcp_ping(host, port)
+    if ping is None or ping > 600:
+        return None
+        
+    outbound = _line_to_outbound(original)
+    if not outbound: return None
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc: return None
+    
+    try:
+        if not wait_for_port(socks_port):
+            return None
+            
+        proxies = {"http": f"socks5://127.0.0.1:{socks_port}", "https": f"socks5://127.0.0.1:{socks_port}"}
+        success_count = 0
+        
+        for url in TEST_URLS:
+            try:
+                r = _session.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
+                if r.status_code == 200:
+                    success_count += 1
+                    if success_count >= 2:
+                        return original, host
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+    finally:
+        _stop_xray(proc, cfg)
 
-def main():
+def update_readme(total_nodes):
+    msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
+    readme_content = f"""# @qw1lsVPN FREE
+
+⚡ **Автоматическая подписка на рабочие VLESS/VMess/Trojan ноды**  
+Обновляется регулярно через GitHub Actions. Без рекламы и ограничений.
+
+---
+
+### 📊 Статус:
+* **Активных серверов:** `{total_nodes}`
+* **Последнее обновление:** `{msk_time}`
+
+---
+
+### 🔗 Ссылка на подписку:
+Добавьте эту ссылку в свой клиент (**Hiddify**, **NekoBox**, **v2rayNG**):
+
+```text
+[https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt](https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt)
+    def main():
     load_black_list()
     
-    print("📥 Загрузка источников...")
+    print("📥 Загрузка источников из sources.txt...")
     raw_configs = set()
     try:
         r = _session.get(SOURCES_LIST_URL, timeout=10)
@@ -330,10 +388,18 @@ def main():
     final_configs = []
     time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
     
+    is_first_node = True
+    
     for (country, flag), nodes in country_groups.items():
         for idx, url in enumerate(nodes[:5]):  # Топ-5 нод на каждую страну
             base_url = url.split('#')[0]
-            node_name = f"{flag} {country} ({idx+1})"
+            
+            if is_first_node:
+                node_name = f"⚡ {flag} {country} (Best)"
+                is_first_node = False
+            else:
+                node_name = f"{flag} {country} ({idx+1})"
+                
             full_name = unquote(f"{node_name} | @qw1lsVPN FREE | {time_str}")
             final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
             
