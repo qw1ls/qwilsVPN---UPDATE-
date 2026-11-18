@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import ipaddress
 
-# Ускоренные настройки для быстрой работы в GitHub Actions
+# Настройки для быстрой и стабильной работы
 TIMEOUT_PER_URL = 3
 MAX_TCP_PING_MS = 350
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
@@ -313,7 +313,8 @@ def test_single_config(line):
         return None
     finally:
         _stop_xray(proc, cfg)
-        def update_readme(total_nodes):
+
+def update_readme(total_nodes):
     msk_time = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y в %H:%M МСК")
     readme_content = (
         "# @qw1lsVPN FREE\n\n"
@@ -404,14 +405,14 @@ def main():
     time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
     total_count = len(valid_nodes)
     
-    # 1. Абсолютный лидер по пингу (Флаг первый, затем молния)
+    # 1. Абсолютный лидер по пингу
     b_country, b_flag, b_cfg, b_ping = best_node
     b_base_url = b_cfg.split('#')[0]
     best_name = f"{b_flag} ⚡ {b_country} ({int(b_ping)}ms)"
     best_full_name = unquote(f"{best_name} | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
     final_configs.append(f"{b_base_url}#{urlparse(f'/?{best_full_name}').path or best_full_name}")
     
-    # 2. Ноды из белых списков (Флаг ЕС, описание с предупреждением)
+    # 2. Ноды из белых списков
     for country, flag, cfg, ping in valid_nodes:
         if cfg in whitelist_valid and cfg != b_cfg:
             base_url = cfg.split('#')[0]
