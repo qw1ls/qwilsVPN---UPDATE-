@@ -8,23 +8,21 @@ import socket
 import subprocess
 import tempfile
 import signal
-import threading
 import re
 import random
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import ipaddress
 
-# Настройки для быстрой и стабильной работы
+# Настройки скорости и таймаутов
 TIMEOUT_PER_URL = 3
 MAX_TCP_PING_MS = 350
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000
-MAX_CONFIGS_TO_CHECK = 350
+MAX_CONFIGS_TO_CHECK = 300
 
 SOURCES_LIST_URL = "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt"
 WHITELIST_SOURCES = [
@@ -35,7 +33,6 @@ WHITELIST_SOURCES = [
 
 OUTPUT_FILE = "sub.txt"
 README_FILE = "README.md"
-IP_BLACKLIST_FILE = "ip_blacklist.txt"
 
 TEST_URLS = [
     "https://www.instagram.com",
@@ -46,13 +43,10 @@ TEST_URLS = [
 
 country_cache = {}
 dns_cache = {}
-STATIC_IP_BLACKLIST = []
 
 _session = requests.Session()
 _session.headers.update({
     "User-Agent": "Happ/4.1.0/Android/17860741775021899510",
-    "X-Device-Locale": "ru",
-    "X-Hwid": "9dcd98947a040627",
     "Connection": "close",
 })
 _retry_strategy = Retry(total=2, backoff_factor=0.3, status_forcelist=[429, 500])
@@ -80,25 +74,19 @@ def get_country(host):
     if not ip: return "Другие", "🌍"
     if ip in country_cache: return country_cache[ip]
     
-    providers = [
-        (f"http://ip-api.com/json/{ip}?fields=status,country,countryCode", lambda d: (d.get("country", ""), d.get("countryCode", "").upper()) if d.get("status") == "success" else None),
-        (f"https://ipwho.is/{ip}", lambda d: (d.get("country", ""), d.get("country_code", "").upper()) if d.get("country_code") else None)
-    ]
-    
-    for url, parse in providers:
-        try:
-            r = _session.get(url, timeout=2)
-            if r.status_code == 200:
-                res = parse(r.json())
-                if res and res[1]:
-                    code = res[1]
-                    flag = chr(ord(code[0]) + 127397) + chr(ord(code[1]) + 127397)
-                    val = (res[0], flag)
-                    country_cache[ip] = val
-                    return val
-        except Exception:
-            continue
-            
+    try:
+        r = _session.get(f"http://ip-api.com/json/{ip}?fields=status,country,countryCode", timeout=2)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("status") == "success" and d.get("countryCode"):
+                code = d.get("countryCode").upper()
+                flag = chr(ord(code[0]) + 127397) + chr(ord(code[1]) + 127397)
+                val = (d.get("country"), flag)
+                country_cache[ip] = val
+                return val
+    except Exception:
+        pass
+        
     res = ("Другие", "🌍")
     country_cache[ip] = res
     return res
@@ -107,29 +95,6 @@ def prefetch_countries_batch(hosts):
     print(f"🌍 Определение локаций ({len(hosts)} серверов)...")
     with ThreadPoolExecutor(max_workers=30) as ex:
         list(ex.map(get_country, hosts))
-    print("✅ Локации успешно определены.")
-
-def load_black_list():
-    global STATIC_IP_BLACKLIST
-    if os.path.exists(IP_BLACKLIST_FILE):
-        with open(IP_BLACKLIST_FILE, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    try: STATIC_IP_BLACKLIST.append(ipaddress.ip_network(line, strict=False))
-                    except ValueError: pass
-
-def is_ip_blacklisted(host):
-    if not STATIC_IP_BLACKLIST or not host: return False
-    try: ip = ipaddress.ip_address(host)
-    except ValueError:
-        resolved = resolve_host(host)
-        if not resolved: return False
-        try: ip = ipaddress.ip_address(resolved)
-        except ValueError: return False
-    for net in STATIC_IP_BLACKLIST:
-        if ip in net: return True
-    return False
 
 def tcp_ping(host, port):
     try:
@@ -283,7 +248,6 @@ def test_single_config(line):
     if not hp: return None
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0: return None
-    if is_ip_blacklisted(host): return None
     
     ping = tcp_ping(host, port)
     if ping is None or ping > MAX_TCP_PING_MS:
@@ -300,7 +264,6 @@ def test_single_config(line):
             return None
             
         proxies = {"http": f"socks5://127.0.0.1:{socks_port}", "https": f"socks5://127.0.0.1:{socks_port}"}
-        
         for url in TEST_URLS:
             try:
                 r = _session.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
@@ -319,14 +282,8 @@ def update_readme(total_nodes):
     readme_content = (
         "# @qw1lsVPN FREE\n\n"
         "⚡ **Автоматическая подписка на рабочие VLESS/VMess/Trojan ноды**\n"
-        "Обновляется регулярно через GitHub Actions. Без рекламы и ограничений.\n\n"
-        "---\n\n"
-        "### 📊 Статус:\n"
         f"* **Активных серверов:** `{total_nodes}`\n"
         f"* **Последнее обновление:** `{msk_time}`\n\n"
-        "---\n\n"
-        "### 🔗 Ссылка на подписку:\n"
-        "Добавьте эту ссылку в свой клиент (**Hiddify**, **NekoBox**, **v2rayNG**):\n\n"
         "```text\n"
         "[https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt](https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sub.txt)\n"
         "```\n"
@@ -351,9 +308,7 @@ def fetch_configs_from_url(url):
     return configs
 
 def main():
-    load_black_list()
-    
-    print("📥 Загрузка основных источников из sources.txt...")
+    print("📥 Загрузка источников...")
     main_raw_configs = set()
     try:
         r = _session.get(SOURCES_LIST_URL, timeout=8)
@@ -362,26 +317,23 @@ def main():
             for url in urls:
                 main_raw_configs.update(fetch_configs_from_url(url))
     except Exception as e:
-        print(f"⚠️ Ошибка загрузки списка источников: {e}")
+        print(f"⚠️ Ошибка: {e}")
 
-    print("📥 Загрузка специальных белых списков (White List)...")
     whitelist_raw_configs = set()
     for wl_url in WHITELIST_SOURCES:
         whitelist_raw_configs.update(fetch_configs_from_url(wl_url))
 
     all_configs = list(main_raw_configs.union(whitelist_raw_configs))
     random.shuffle(all_configs)
-    
     all_configs = all_configs[:MAX_CONFIGS_TO_CHECK]
-    print(f"🔎 Отобрано для быстрой проверки: {len(all_configs)} конфигов...")
-    
-    valid_nodes = []
-    whitelist_valid = set()
     
     hosts_to_check = [extract_host_port(c)[0] for c in all_configs if extract_host_port(c)]
     prefetch_countries_batch(hosts_to_check)
     
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    valid_nodes = []
+    whitelist_valid = set()
+    
+    with ThreadPoolExecutor(max_workers=40) as executor:
         futures = {executor.submit(test_single_config, cfg): cfg for cfg in all_configs}
         for future in as_completed(futures):
             res = future.result()
@@ -392,8 +344,6 @@ def main():
                 if cfg in whitelist_raw_configs:
                     whitelist_valid.add(cfg)
                 
-    print(f"✅ Прошли проверку: {len(valid_nodes)} серверов.")
-    
     if not valid_nodes:
         print("❌ Нет рабочих серверов!")
         return
@@ -405,14 +355,14 @@ def main():
     time_str = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")
     total_count = len(valid_nodes)
     
-    # 1. Абсолютный лидер по пингу
+    # 1. Лидер по пингу
     b_country, b_flag, b_cfg, b_ping = best_node
     b_base_url = b_cfg.split('#')[0]
     best_name = f"{b_flag} ⚡ {b_country} ({int(b_ping)}ms)"
     best_full_name = unquote(f"{best_name} | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
     final_configs.append(f"{b_base_url}#{urlparse(f'/?{best_full_name}').path or best_full_name}")
     
-    # 2. Ноды из белых списков
+    # 2. Белые списки
     for country, flag, cfg, ping in valid_nodes:
         if cfg in whitelist_valid and cfg != b_cfg:
             base_url = cfg.split('#')[0]
@@ -420,7 +370,7 @@ def main():
             full_name = unquote(f"{node_name} | white list при крайних случаях! | {total_count} серверов | Обновлено: {time_str} | @qw1lsVPN")
             final_configs.append(f"{base_url}#{urlparse(f'/?{full_name}').path or full_name}")
 
-    # 3. Остальные серверы по странам
+    # 3. Остальные
     country_groups = {}
     for country, flag, cfg, ping in valid_nodes:
         if cfg not in whitelist_valid and cfg != b_cfg:
@@ -441,9 +391,8 @@ def main():
         f.write(encoded_sub)
         
     update_readme(len(final_configs))
-    print(f"🎉 Готово! Файл подписки сохранен в {OUTPUT_FILE}")
+    print(f"🎉 Готово! Сохранено нод: {len(final_configs)}")
 
 if __name__ == "__main__":
     main()
-        
         
