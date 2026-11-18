@@ -9,7 +9,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Даем боту права на запись в репозиторий
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,7 +35,10 @@ jobs:
         run: python3 update_subs.py
 
       - name: Commit and Push changes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: 'Automated update: Checked VPN nodes'
-          file_pattern: sub.txt README.md
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git status
+          git add sub.txt README.md
+          git commit -m "Automated update: Checked VPN nodes" || echo "No changes to commit"
+          git push
