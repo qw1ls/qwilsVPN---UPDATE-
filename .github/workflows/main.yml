@@ -8,8 +8,10 @@ on:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,13 +24,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests "requests[socks]" PySocks
 
       - name: Install Xray core explicitly
         run: |
-          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip xray.zip xray -d .
+          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip xray -d .
           chmod +x ./xray
+          ./xray version
           echo "$PWD" >> $GITHUB_PATH
 
       - name: Run updater script
