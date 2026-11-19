@@ -25,8 +25,9 @@ BLOCKED_SITES = [
     "https://x.com/",
     "https://discord.com/",
 ]
-MIN_PASSED_SITES = 3
-SITE_TIMEOUT = 3
+MIN_PASSED_SITES = 2
+SITE_TIMEOUT = 2.5
+MAX_LATENCY_MS = 1500.0
 MAX_SERVERS_TO_TEST = 50
 MAX_RUNTIME_SECONDS = 180
 
@@ -265,7 +266,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(0.25)
+        time.sleep(0.2)
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{port}",
@@ -302,7 +303,9 @@ def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
                 continue
 
         if passed >= MIN_PASSED_SITES and latencies:
-            return True, sum(latencies) / len(latencies)
+            avg_ms = sum(latencies) / len(latencies)
+            if avg_ms <= MAX_LATENCY_MS:
+                return True, avg_ms
         return False, float("inf")
     finally:
         if proc and proc.poll() is None:
@@ -420,7 +423,6 @@ def update_readme(count: int) -> None:
 def main() -> None:
     start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_SERVERS_TO_TEST]
-    # Храним кортежи: (raw_uri, title, latency_ms)
     working_entries: list[tuple[str, str, float]] = []
 
     for i, (uri, meta) in enumerate(candidates, start=1):
@@ -437,19 +439,15 @@ def main() -> None:
             working_entries.append((parsed["raw"], title, avg_ms))
             log(f"  -> OK ({avg_ms:.0f} ms): {title}")
         else:
-            log("  -> FAIL")
+            log("  -> FAIL / SLOW")
 
-    fastest_idx = None
-    if working_entries:
-        fastest_idx = min(
-            range(len(working_entries)),
-            key=lambda idx: working_entries[idx][2],
-        )
+    # Сортируем от самого быстрого к более медленному
+    working_entries.sort(key=lambda item: item[2])
 
     final_links: list[str] = []
     for idx, (raw_uri, title, avg_ms) in enumerate(working_entries):
-        final_title = f"{title} ⚡" if idx == fastest_idx else title
-        if idx == fastest_idx:
+        final_title = f"{title} ⚡" if idx == 0 else title
+        if idx == 0:
             log(f"Fastest server: {final_title} ({avg_ms:.0f} ms)")
         final_links.append(f"{raw_uri}#{quote(final_title)}")
 
