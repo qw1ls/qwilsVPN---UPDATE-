@@ -25,9 +25,10 @@ BLOCKED_SITES = [
     "https://x.com/",
     "https://discord.com/",
 ]
-MIN_PASSED_SITES = 3
-SITE_TIMEOUT = 6
-MAX_SERVERS_TO_TEST = 120
+MIN_PASSED_SITES = 2
+SITE_TIMEOUT = 3
+MAX_SERVERS_TO_TEST = 40
+MAX_RUNTIME_SECONDS = 150
 
 COUNTRY_MAP = {
     "DE": ("🇩🇪", "Германия"),
@@ -74,6 +75,10 @@ WHITELIST_KEYWORDS = (
     "белые списки",
     "wl",
 )
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
 
 def get_free_port() -> int:
@@ -250,7 +255,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(0.5)
+        time.sleep(0.25)
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{port}",
@@ -265,7 +270,9 @@ def check_vless_on_blocked_sites(parsed: dict) -> bool:
         }
 
         passed = 0
-        for url in BLOCKED_SITES:
+        for idx, url in enumerate(BLOCKED_SITES):
+            if idx == 3 and passed == 0:
+                break
             try:
                 resp = requests.get(
                     url,
@@ -284,7 +291,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> bool:
         if proc and proc.poll() is None:
             proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 proc.kill()
         if os.path.exists(cfg_path):
@@ -296,7 +303,7 @@ def lookup_country(host: str) -> tuple[str, str]:
         ip = socket.gethostbyname(host)
         r = requests.get(
             f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
-            timeout=4,
+            timeout=3,
         )
         if r.ok:
             data = r.json()
@@ -312,8 +319,8 @@ def lookup_country(host: str) -> tuple[str, str]:
 
 
 def collect_candidates_from_sources() -> list[tuple[str, str]]:
-    """Возвращает список кортежей (vless_uri, meta_context)."""
-    resp = requests.get(SOURCES_URL, timeout=15)
+    log(f"Fetching sources from {SOURCES_URL}...")
+    resp = requests.get(SOURCES_URL, timeout=10)
     resp.raise_for_status()
     raw_text = maybe_b64_decode(resp.text)
 
@@ -338,7 +345,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
 
         if uri_part.startswith(("http://", "https://")):
             try:
-                sub_r = requests.get(uri_part, timeout=12)
+                sub_r = requests.get(uri_part, timeout=6)
                 if sub_r.ok:
                     sub_txt = maybe_b64_decode(sub_r.text)
                     for sline in sub_txt.splitlines():
@@ -360,6 +367,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                 seen_raw.add(base_uri)
                 candidates.append((uri_part, combined_meta))
 
+    log(f"Collected {len(candidates)} unique vless candidates.")
     return candidates
 
 
@@ -391,23 +399,31 @@ def update_readme(count: int) -> None:
 
 
 def main() -> None:
+    start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_SERVERS_TO_TEST]
     working_links: list[str] = []
 
-    for uri, meta in candidates:
+    for i, (uri, meta) in enumerate(candidates, start=1):
+        if time.time() - start_ts > MAX_RUNTIME_SECONDS:
+            log("Reached MAX_RUNTIME_SECONDS limit, finishing check early.")
+            break
         parsed = parse_vless_uri(uri)
         if not parsed:
             continue
+        log(f"[{i}/{len(candidates)}] Checking {parsed['host']}:{parsed['port']}...")
         if check_vless_on_blocked_sites(parsed):
             title = format_server_name(parsed, meta)
             final_uri = f"{parsed['raw']}#{quote(title)}"
             working_links.append(final_uri)
+            log(f"  -> OK: {title}")
+        else:
+            log("  -> FAIL")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(working_links) + ("\n" if working_links else ""))
 
     update_readme(len(working_links))
-    print(f"Done. Active servers written to {SUB_FILE}: {len(working_links)}")
+    log(f"Done. Active servers written to {SUB_FILE}: {len(working_links)}")
 
 
 if __name__ == "__main__":
