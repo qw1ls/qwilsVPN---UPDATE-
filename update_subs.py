@@ -19,8 +19,9 @@ SOURCES_URL = (
 BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = "sub.txt"
 README_FILE = "README.md"
+BLACKLIST_FILE = "blacklist_local.txt"
+BLACKLIST_TTL_SECONDS = 3 * 3600  # 3 часа кэша недоступных хост:порт
 
-# Проверяем доступность и корректность ответа через прокси в условиях ТСПУ/DPI
 TEST_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://www.cloudflare.com/cdn-cgi/trace",
@@ -28,21 +29,33 @@ TEST_URLS = [
     "https://www.youtube.com/generate_204",
 ]
 
-# Несколько зеркал для теста скорости на случай блокировки/троттлинга одного хоста
 SPEEDTEST_URLS = [
     "https://speed.cloudflare.com/__down?bytes=5242880",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
 
-MIN_SUCCESS = 2
+# Обычные сервера vs white list / LTE (в РФ под ТСПУ/мобилками задержки выше)
+MAX_TCP_PING_MS = 900
+TCP_PING_TIMEOUT = 1.2
 TIMEOUT_PER_URL = 6
-MAX_TCP_PING_MS = 1800
-TCP_PING_TIMEOUT = 1.5
 SPEEDTEST_MAX_SECONDS = 4.5
-SPEEDTEST_CONNECT_TIMEOUT = 4.0
+MIN_SPEED_NORMAL_MBPS = 0.3
+
+LTE_MAX_TCP_PING_MS = 8000
+LTE_TCP_PING_TIMEOUT = 2.5
+LTE_TIMEOUT_PER_URL = 15
+LTE_SPEEDTEST_MAX_SECONDS = 8.0
+MIN_SPEED_LTE_MBPS = 0.05
+
+MIN_SUCCESS = 2
 MAX_CANDIDATES = 120
 CHECK_WORKERS = 8
 MAX_RUNTIME_SECONDS = 175
+
+# Заведомо проблемные/заблокированные пути WS (как идея ws_patch_blocklist у vlessforu)
+BLOCKED_WS_PATHS = {
+    "/ws-patch",
+}
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -98,9 +111,56 @@ WHITELIST_KEYWORDS = (
     "wl",
 )
 
+_blacklist_cache: dict[tuple[str, int], int] = {}
+
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def load_blacklist_cache() -> None:
+    _blacklist_cache.clear()
+    if not os.path.exists(BLACKLIST_FILE):
+        return
+    now = int(time.time())
+    try:
+        with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().rsplit(":", 2)
+                if len(parts) != 3:
+                    continue
+                host, port_s, ts_s = parts
+                try:
+                    port, ts = int(port_s), int(ts_s)
+                except ValueError:
+                    continue
+                if now - ts <= BLACKLIST_TTL_SECONDS:
+                    _blacklist_cache[(host, port)] = ts
+    except OSError:
+        pass
+
+
+def is_cached_bad(host: str, port: int) -> bool:
+    ts = _blacklist_cache.get((host, port))
+    if ts is None:
+        return False
+    if int(time.time()) - ts > BLACKLIST_TTL_SECONDS:
+        _blacklist_cache.pop((host, port), None)
+        return False
+    return True
+
+
+def mark_cached_bad(host: str, port: int) -> None:
+    key = (host, port)
+    now = int(time.time())
+    if key in _blacklist_cache and now - _blacklist_cache[key] < 600:
+        return
+    _blacklist_cache[key] = now
+    try:
+        with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{host}:{port}:{now}\n")
+    except OSError:
+        pass
 
 
 def get_free_port() -> int:
@@ -122,11 +182,12 @@ def wait_for_port(port: int, timeout: float = 3.0) -> bool:
     return False
 
 
-def tcp_ping(host: str, port: int) -> float | None:
+def tcp_ping(host: str, port: int, is_lte: bool = False) -> float | None:
+    timeout = LTE_TCP_PING_TIMEOUT if is_lte else TCP_PING_TIMEOUT
     try:
         start = time.perf_counter()
-        with socket.create_connection((host, port), timeout=TCP_PING_TIMEOUT) as sock:
-            sock.settimeout(TCP_PING_TIMEOUT)
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
             return (time.perf_counter() - start) * 1000.0
     except OSError:
         return None
@@ -171,6 +232,8 @@ def clean_uri(uri: str) -> str:
 
 def extract_host_port(uri: str) -> tuple[str, int] | None:
     base = clean_uri(uri)
+    if len(base) > 8192:
+        return None
     try:
         p = urlparse(base)
         if p.scheme in ("vless", "trojan"):
@@ -195,6 +258,11 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     security = (query.get("security", ["none"])[0] or "none").lower()
     sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0] or fallback_host)
     fp = unquote(query.get("fp", [""])[0] or "chrome")
+    path_hdr = unquote(query.get("path", ["/"])[0] or "/")
+
+    if network == "ws" and path_hdr in BLOCKED_WS_PATHS:
+        return {}
+
     stream: dict = {"network": network}
 
     if security == "reality":
@@ -219,7 +287,6 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
         }
 
     host_hdr = unquote(query.get("host", [sni])[0] or sni)
-    path_hdr = unquote(query.get("path", ["/"])[0] or "/")
 
     if network == "ws":
         stream["wsSettings"] = {
@@ -290,6 +357,9 @@ def uri_to_outbound(uri: str) -> dict | None:
             if not add or not uid:
                 return None
             net = str(data.get("net", "tcp")).lower()
+            path_val = str(data.get("path", "/") or "/")
+            if net == "ws" and path_val in BLOCKED_WS_PATHS:
+                return None
             stream: dict = {"network": net}
             sni_val = data.get("sni") or data.get("host", "")
             if str(data.get("tls", "")).lower() == "tls":
@@ -301,7 +371,7 @@ def uri_to_outbound(uri: str) -> dict | None:
                 }
             if net == "ws":
                 stream["wsSettings"] = {
-                    "path": data.get("path", "/") or "/",
+                    "path": path_val,
                     "headers": {"Host": data.get("host", "")},
                 }
             elif net == "grpc":
@@ -399,8 +469,9 @@ def _stop_xray(proc, cfg_path):
             pass
 
 
-def measure_speed_mbps(proxies: dict, headers: dict) -> float:
-    """Измеряет устойчивую скорость скачивания (Мбит/с), отсекая зависания."""
+def measure_speed_mbps(proxies: dict, headers: dict, is_lte: bool) -> float:
+    max_seconds = LTE_SPEEDTEST_MAX_SECONDS if is_lte else SPEEDTEST_MAX_SECONDS
+    req_timeout = LTE_TIMEOUT_PER_URL if is_lte else TIMEOUT_PER_URL
     for url in SPEEDTEST_URLS:
         try:
             downloaded = 0
@@ -409,7 +480,7 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
                 url,
                 proxies=proxies,
                 headers=headers,
-                timeout=(SPEEDTEST_CONNECT_TIMEOUT, TIMEOUT_PER_URL),
+                timeout=(4.0, req_timeout),
                 stream=True,
             ) as r:
                 if r.status_code != 200:
@@ -418,11 +489,11 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
                     if not chunk:
                         continue
                     downloaded += len(chunk)
-                    if time.perf_counter() - start >= SPEEDTEST_MAX_SECONDS:
+                    if time.perf_counter() - start >= max_seconds:
                         break
             elapsed = time.perf_counter() - start
-            # Требуем хотя бы 64 КБ за окно теста, иначе узел задушен ТСПУ/перегружен
-            if elapsed >= 0.25 and downloaded >= 65536:
+            min_bytes = 16384 if is_lte else 65536
+            if elapsed >= 0.25 and downloaded >= min_bytes:
                 return (downloaded * 8.0 / (1024 * 1024)) / elapsed
         except requests.RequestException:
             continue
@@ -430,7 +501,6 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
 
 
 def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
-    """Возвращает (is_ok, speed_mbps) с учётом проверок под ТСПУ."""
     hp = extract_host_port(uri)
     if not hp:
         return False, 0.0
@@ -438,8 +508,15 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
         return False, 0.0
 
-    ping = tcp_ping(host, port)
-    if ping is None or ping > MAX_TCP_PING_MS:
+    is_lte = is_whitelist_entry(f"{uri} {meta}")
+    if not is_lte and is_cached_bad(host, port):
+        return False, 0.0
+
+    max_ping = LTE_MAX_TCP_PING_MS if is_lte else MAX_TCP_PING_MS
+    ping = tcp_ping(host, port, is_lte=is_lte)
+    if ping is None or ping > max_ping:
+        if not is_lte:
+            mark_cached_bad(host, port)
         return False, 0.0
 
     outbound = uri_to_outbound(uri)
@@ -453,6 +530,8 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
 
     try:
         if not wait_for_port(socks_port):
+            if not is_lte:
+                mark_cached_bad(host, port)
             return False, 0.0
 
         proxies = {
@@ -468,13 +547,14 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
         }
 
         success = 0
+        url_timeout = LTE_TIMEOUT_PER_URL if is_lte else TIMEOUT_PER_URL
         for url in TEST_URLS:
             try:
                 r = requests.get(
                     url,
                     proxies=proxies,
                     headers=headers,
-                    timeout=(4.0, TIMEOUT_PER_URL),
+                    timeout=(4.0, url_timeout),
                 )
                 if r.status_code in (200, 204):
                     if r.status_code == 204 or len(r.content or b"") > 16:
@@ -485,11 +565,13 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
                 continue
 
         if success < MIN_SUCCESS:
+            if not is_lte:
+                mark_cached_bad(host, port)
             return False, 0.0
 
-        speed = measure_speed_mbps(proxies, headers)
-        # Если узел открыл страницу, но вообще не качает данные (< 0.15 Mbps), в реальном использовании он будет фризить
-        if speed < 0.15:
+        speed = measure_speed_mbps(proxies, headers, is_lte=is_lte)
+        min_speed = MIN_SPEED_LTE_MBPS if is_lte else MIN_SPEED_NORMAL_MBPS
+        if speed < min_speed:
             return False, 0.0
         return True, speed
     finally:
@@ -516,11 +598,50 @@ def lookup_country(host: str) -> tuple[str, str]:
     return ("🌐", "Сервер")
 
 
+def _fetch_text_with_fallback(url: str, timeout: int = 8) -> str | None:
+    try:
+        resp = requests.get(url, timeout=timeout)
+        if resp.ok:
+            return resp.text
+    except Exception:
+        pass
+
+    # Фолбэк через первый рабочий узел из текущего sub.txt (как идея fallback_proxy у vlessforu)
+    if not os.path.exists(SUB_FILE):
+        return None
+    try:
+        with open(SUB_FILE, "r", encoding="utf-8") as f:
+            first_uri = next((l.strip() for l in f if "://" in l), None)
+        if not first_uri:
+            return None
+        outbound = uri_to_outbound(first_uri)
+        if not outbound:
+            return None
+        port = get_free_port()
+        proc, cfg = _spawn_xray(outbound, port)
+        if not proc:
+            return None
+        try:
+            if not wait_for_port(port):
+                return None
+            proxies = {
+                "http": f"socks5h://127.0.0.1:{port}",
+                "https": f"socks5h://127.0.0.1:{port}",
+            }
+            r = requests.get(url, proxies=proxies, timeout=timeout)
+            return r.text if r.ok else None
+        finally:
+            _stop_xray(proc, cfg)
+    except Exception:
+        return None
+
+
 def collect_candidates_from_sources() -> list[tuple[str, str]]:
     log(f"Fetching sources from {SOURCES_URL}...")
-    resp = requests.get(SOURCES_URL, timeout=10)
-    resp.raise_for_status()
-    raw_text = maybe_b64_decode(resp.text)
+    raw_src = _fetch_text_with_fallback(SOURCES_URL, timeout=10)
+    if not raw_src:
+        raise RuntimeError(f"Failed to fetch sources from {SOURCES_URL}")
+    raw_text = maybe_b64_decode(raw_src)
 
     candidates: list[tuple[str, str]] = []
     seen_base: set[str] = set()
@@ -543,21 +664,18 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
             line_meta = f"{current_group_meta} {parts[1].strip()}".strip()
 
         if uri_part.startswith(("http://", "https://")):
-            try:
-                sub_r = requests.get(uri_part, timeout=6)
-                if sub_r.ok:
-                    sub_txt = maybe_b64_decode(sub_r.text)
-                    for sline in sub_txt.splitlines():
-                        sline = sline.strip()
-                        if sline.startswith(schemes):
-                            frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
-                            combined_meta = f"{line_meta} {frag}".strip()
-                            base_uri = clean_uri(sline)
-                            if base_uri not in seen_base:
-                                seen_base.add(base_uri)
-                                candidates.append((sline, combined_meta))
-            except Exception:
-                continue
+            sub_raw = _fetch_text_with_fallback(uri_part, timeout=6)
+            if sub_raw:
+                sub_txt = maybe_b64_decode(sub_raw)
+                for sline in sub_txt.splitlines():
+                    sline = sline.strip()
+                    if sline.startswith(schemes):
+                        frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
+                        combined_meta = f"{line_meta} {frag}".strip()
+                        base_uri = clean_uri(sline)
+                        if base_uri not in seen_base:
+                            seen_base.add(base_uri)
+                            candidates.append((sline, combined_meta))
         elif uri_part.startswith(schemes):
             frag = unquote(uri_part.split("#", 1)[1]) if "#" in uri_part else ""
             combined_meta = f"{line_meta} {frag}".strip()
@@ -602,6 +720,7 @@ def update_readme(count: int) -> None:
 
 def main() -> None:
     start_ts = time.time()
+    load_blacklist_cache()
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
     working: list[tuple[str, str, float]] = []
 
