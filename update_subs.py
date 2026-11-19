@@ -4,7 +4,6 @@ import os
 import re
 import signal
 import socket
-import statistics
 import subprocess
 import tempfile
 import time
@@ -21,25 +20,29 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = "sub.txt"
 README_FILE = "README.md"
 
+# Проверяем доступность и корректность ответа через прокси в условиях ТСПУ/DPI
 TEST_URLS = [
     "https://www.gstatic.com/generate_204",
-    "https://www.youtube.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace",
     "https://telegram.org",
-    "https://www.instagram.com",
+    "https://www.youtube.com/generate_204",
 ]
-SPEEDTEST_URL = (
-    "https://raw.githubusercontent.com/BitDoctor/speed-test-file/"
-    "refs/heads/master/5mb.txt"
-)
+
+# Несколько зеркал для теста скорости на случай блокировки/троттлинга одного хоста
+SPEEDTEST_URLS = [
+    "https://speed.cloudflare.com/__down?bytes=5242880",
+    "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
+]
 
 MIN_SUCCESS = 2
-TIMEOUT_PER_URL = 5
-MAX_TCP_PING_MS = 1500
-TCP_PING_TIMEOUT = 1.2
-SPEEDTEST_TIMEOUT = 6
+TIMEOUT_PER_URL = 6
+MAX_TCP_PING_MS = 1800
+TCP_PING_TIMEOUT = 1.5
+SPEEDTEST_MAX_SECONDS = 4.5
+SPEEDTEST_CONNECT_TIMEOUT = 4.0
 MAX_CANDIDATES = 120
-CHECK_WORKERS = 6
-MAX_RUNTIME_SECONDS = 180
+CHECK_WORKERS = 8
+MAX_RUNTIME_SECONDS = 175
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -90,6 +93,7 @@ WHITELIST_KEYWORDS = (
     "cidr",
     "lte",
     "4g",
+    "5g",
     "white",
     "wl",
 )
@@ -105,7 +109,7 @@ def get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 2.5) -> bool:
+def wait_for_port(port: int, timeout: float = 3.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -121,9 +125,8 @@ def wait_for_port(port: int, timeout: float = 2.5) -> bool:
 def tcp_ping(host: str, port: int) -> float | None:
     try:
         start = time.perf_counter()
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        with socket.create_connection((host, port), timeout=TCP_PING_TIMEOUT) as sock:
             sock.settimeout(TCP_PING_TIMEOUT)
-            sock.connect((host, port))
             return (time.perf_counter() - start) * 1000.0
     except OSError:
         return None
@@ -190,30 +193,33 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
 def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     network = (query.get("type", ["tcp"])[0] or "tcp").lower()
     security = (query.get("security", ["none"])[0] or "none").lower()
-    sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0])
-    fp = unquote(query.get("fp", [""])[0])
+    sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0] or fallback_host)
+    fp = unquote(query.get("fp", [""])[0] or "chrome")
     stream: dict = {"network": network}
 
     if security == "reality":
+        pbk = unquote(query.get("pbk", [""])[0])
+        if not pbk:
+            return {}
         stream["security"] = "reality"
         stream["realitySettings"] = {
             "show": False,
-            "fingerprint": fp or "chrome",
+            "fingerprint": fp,
             "serverName": sni,
-            "publicKey": unquote(query.get("pbk", [""])[0]),
+            "publicKey": pbk,
             "shortId": unquote(query.get("sid", [""])[0]),
-            "spiderX": unquote(query.get("spx", [""])[0]),
+            "spiderX": unquote(query.get("spx", ["/"])[0] or "/"),
         }
     elif security == "tls":
         stream["security"] = "tls"
         stream["tlsSettings"] = {
             "serverName": sni,
-            "fingerprint": fp or "chrome",
+            "fingerprint": fp,
             "allowInsecure": False,
         }
 
-    host_hdr = unquote(query.get("host", [sni])[0])
-    path_hdr = unquote(query.get("path", ["/"])[0]) or "/"
+    host_hdr = unquote(query.get("host", [sni])[0] or sni)
+    path_hdr = unquote(query.get("path", ["/"])[0] or "/")
 
     if network == "ws":
         stream["wsSettings"] = {
@@ -249,9 +255,14 @@ def uri_to_outbound(uri: str) -> dict | None:
     try:
         if base.startswith("vless://"):
             p = urlparse(base)
+            if not p.hostname or not p.username:
+                return None
             query = parse_qs(p.query)
+            stream = _build_stream_settings(query, p.hostname)
+            if not stream:
+                return None
             user: dict = {
-                "id": p.username,
+                "id": unquote(p.username),
                 "encryption": query.get("encryption", ["none"])[0] or "none",
             }
             if flow := query.get("flow", [""])[0]:
@@ -267,19 +278,25 @@ def uri_to_outbound(uri: str) -> dict | None:
                         }
                     ]
                 },
-                "streamSettings": _build_stream_settings(query, p.hostname or ""),
+                "streamSettings": stream,
             }
 
         if base.startswith("vmess://"):
             b64 = base[8:]
             b64 += "=" * (-len(b64) % 4)
             data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            add = data.get("add")
+            uid = data.get("id")
+            if not add or not uid:
+                return None
             net = str(data.get("net", "tcp")).lower()
             stream: dict = {"network": net}
+            sni_val = data.get("sni") or data.get("host", "")
             if str(data.get("tls", "")).lower() == "tls":
                 stream["security"] = "tls"
                 stream["tlsSettings"] = {
-                    "serverName": data.get("sni") or data.get("host", ""),
+                    "serverName": sni_val,
+                    "fingerprint": "chrome",
                     "allowInsecure": False,
                 }
             if net == "ws":
@@ -294,11 +311,11 @@ def uri_to_outbound(uri: str) -> dict | None:
                 "settings": {
                     "vnext": [
                         {
-                            "address": data.get("add"),
+                            "address": str(add),
                             "port": int(data.get("port", 443)),
                             "users": [
                                 {
-                                    "id": data.get("id"),
+                                    "id": str(uid),
                                     "alterId": int(data.get("aid", 0) or 0),
                                     "security": "auto",
                                 }
@@ -311,9 +328,14 @@ def uri_to_outbound(uri: str) -> dict | None:
 
         if base.startswith("trojan://"):
             p = urlparse(base)
+            if not p.hostname or not p.username:
+                return None
             query = parse_qs(p.query)
             if "security" not in query:
                 query["security"] = ["tls"]
+            stream = _build_stream_settings(query, p.hostname)
+            if not stream:
+                return None
             return {
                 "protocol": "trojan",
                 "settings": {
@@ -321,11 +343,11 @@ def uri_to_outbound(uri: str) -> dict | None:
                         {
                             "address": p.hostname,
                             "port": int(p.port or 443),
-                            "password": p.username,
+                            "password": unquote(p.username),
                         }
                     ]
                 },
-                "streamSettings": _build_stream_settings(query, p.hostname or ""),
+                "streamSettings": stream,
             }
     except Exception:
         return None
@@ -377,35 +399,38 @@ def _stop_xray(proc, cfg_path):
             pass
 
 
-def measure_speed_mbps(proxies: dict) -> float:
-    speeds: list[float] = []
-    try:
-        with requests.get(
-            SPEEDTEST_URL,
-            proxies=proxies,
-            timeout=5,
-            stream=True,
-        ) as r:
-            if r.status_code != 200:
-                return 0.0
+def measure_speed_mbps(proxies: dict, headers: dict) -> float:
+    """Измеряет устойчивую скорость скачивания (Мбит/с), отсекая зависания."""
+    for url in SPEEDTEST_URLS:
+        try:
             downloaded = 0
             start = time.perf_counter()
-            for chunk in r.iter_content(chunk_size=8192):
-                if not chunk:
+            with requests.get(
+                url,
+                proxies=proxies,
+                headers=headers,
+                timeout=(SPEEDTEST_CONNECT_TIMEOUT, TIMEOUT_PER_URL),
+                stream=True,
+            ) as r:
+                if r.status_code != 200:
                     continue
-                downloaded += len(chunk)
-                elapsed = time.perf_counter() - start
-                if elapsed > 0.1 and downloaded > 0:
-                    speeds.append((downloaded / (1024 * 1024) * 8) / elapsed)
-                if elapsed >= SPEEDTEST_TIMEOUT:
-                    break
-    except requests.RequestException:
-        return 0.0
-    return statistics.median(speeds) if speeds else 0.0
+                for chunk in r.iter_content(chunk_size=16384):
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if time.perf_counter() - start >= SPEEDTEST_MAX_SECONDS:
+                        break
+            elapsed = time.perf_counter() - start
+            # Требуем хотя бы 64 КБ за окно теста, иначе узел задушен ТСПУ/перегружен
+            if elapsed >= 0.25 and downloaded >= 65536:
+                return (downloaded * 8.0 / (1024 * 1024)) / elapsed
+        except requests.RequestException:
+            continue
+    return 0.0
 
 
 def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
-    """Возвращает (is_ok, speed_mbps)."""
+    """Возвращает (is_ok, speed_mbps) с учётом проверок под ТСПУ."""
     hp = extract_host_port(uri)
     if not hp:
         return False, 0.0
@@ -438,7 +463,7 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/128.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             )
         }
 
@@ -449,10 +474,10 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
                     url,
                     proxies=proxies,
                     headers=headers,
-                    timeout=TIMEOUT_PER_URL,
+                    timeout=(4.0, TIMEOUT_PER_URL),
                 )
                 if r.status_code in (200, 204):
-                    if r.status_code == 204 or len(r.content or b"") > 0:
+                    if r.status_code == 204 or len(r.content or b"") > 16:
                         success += 1
                         if success >= MIN_SUCCESS:
                             break
@@ -462,7 +487,10 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
         if success < MIN_SUCCESS:
             return False, 0.0
 
-        speed = measure_speed_mbps(proxies)
+        speed = measure_speed_mbps(proxies, headers)
+        # Если узел открыл страницу, но вообще не качает данные (< 0.15 Mbps), в реальном использовании он будет фризить
+        if speed < 0.15:
+            return False, 0.0
         return True, speed
     finally:
         _stop_xray(proc, cfg_path)
@@ -575,7 +603,6 @@ def update_readme(count: int) -> None:
 def main() -> None:
     start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
-    # (base_uri, title, speed_mbps)
     working: list[tuple[str, str, float]] = []
 
     def worker(item: tuple[str, str]):
@@ -599,7 +626,6 @@ def main() -> None:
             else:
                 log(f"[{idx}/{len(candidates)}] FAIL {target_str}")
 
-    # Сортируем от самого быстрого к более медленному
     working.sort(key=lambda x: x[2], reverse=True)
 
     final_links: list[str] = []
