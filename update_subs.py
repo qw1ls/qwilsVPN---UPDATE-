@@ -27,8 +27,7 @@ BLOCKED_SITES = [
 ]
 MIN_PASSED_SITES = 2
 SITE_TIMEOUT = 2.5
-MAX_LATENCY_MS = 1500.0
-MAX_SERVERS_TO_TEST = 50
+MAX_SERVERS_TO_TEST = 100
 MAX_RUNTIME_SECONDS = 180
 
 COUNTRY_MAP = {
@@ -75,7 +74,23 @@ WHITELIST_KEYWORDS = (
     "white_list",
     "белый список",
     "белые списки",
+    "1!!",
+    "бс",
     "wl",
+)
+
+WHITELIST_DOMAINS_HINT = (
+    "vk.com",
+    "ok.ru",
+    "yandex.",
+    "gosuslugi.",
+    "mail.ru",
+    "max.ru",
+    "sber",
+    "ozon.ru",
+    "wildberries.ru",
+    "dzen.ru",
+    "rutube.ru",
 )
 
 
@@ -117,9 +132,18 @@ def detect_operators(raw_meta: str) -> str:
     return ", ".join(found) if found else "все операторы"
 
 
-def is_whitelist_entry(raw_meta: str) -> bool:
+def is_whitelist_entry(parsed: dict, raw_meta: str) -> bool:
     lower = raw_meta.lower()
-    return any(kw in lower for kw in WHITELIST_KEYWORDS)
+    if any(kw in lower for kw in WHITELIST_KEYWORDS):
+        return True
+    sni = (parsed["params"].get("sni") or parsed["params"].get("host") or "").lower()
+    host = (parsed["host"] or "").lower()
+    combined_target = f"{sni} {host}"
+    if any(dom in combined_target for dom in WHITELIST_DOMAINS_HINT) and (
+        "обход" in lower or "white" in lower or "бс" in lower
+    ):
+        return True
+    return False
 
 
 def parse_vless_uri(uri: str) -> dict | None:
@@ -243,10 +267,10 @@ def build_xray_config(parsed: dict, socks_port: int) -> dict:
 
 
 def is_valid_site_response(resp: requests.Response) -> bool:
-    if resp.status_code == 204:
+    if resp.status_code in (200, 204):
         return True
-    if resp.status_code == 200:
-        return len(resp.content or b"") > 0
+    if resp.status_code in (301, 302) and resp.headers.get("Location"):
+        return True
     return False
 
 
@@ -284,7 +308,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
         latencies: list[float] = []
 
         for idx, url in enumerate(BLOCKED_SITES):
-            if idx == 2 and passed == 0:
+            if idx == 3 and passed == 0:
                 break
             t0 = time.perf_counter()
             try:
@@ -293,7 +317,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
                     proxies=proxies,
                     headers=headers,
                     timeout=SITE_TIMEOUT,
-                    allow_redirects=True,
+                    allow_redirects=False,
                 )
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 if is_valid_site_response(resp):
@@ -303,9 +327,7 @@ def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
                 continue
 
         if passed >= MIN_PASSED_SITES and latencies:
-            avg_ms = sum(latencies) / len(latencies)
-            if avg_ms <= MAX_LATENCY_MS:
-                return True, avg_ms
+            return True, sum(latencies) / len(latencies)
         return False, float("inf")
     finally:
         if proc and proc.poll() is None:
@@ -395,7 +417,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
 
 def format_server_name(parsed: dict, meta: str) -> str:
     combined = f"{parsed['fragment']} {meta}".strip()
-    if is_whitelist_entry(combined):
+    if is_whitelist_entry(parsed, combined):
         ops = detect_operators(combined)
         return f"🇪🇺 white list ({ops})"
     flag, country_name = lookup_country(parsed["host"])
@@ -439,9 +461,8 @@ def main() -> None:
             working_entries.append((parsed["raw"], title, avg_ms))
             log(f"  -> OK ({avg_ms:.0f} ms): {title}")
         else:
-            log("  -> FAIL / SLOW")
+            log("  -> FAIL")
 
-    # Сортируем от самого быстрого к более медленному
     working_entries.sort(key=lambda item: item[2])
 
     final_links: list[str] = []
