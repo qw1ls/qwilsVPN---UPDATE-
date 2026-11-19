@@ -20,11 +20,11 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = "sub.txt"
 README_FILE = "README.md"
 BLACKLIST_FILE = "blacklist_local.txt"
-BLACKLIST_TTL_SECONDS = 3 * 3600  # 3 часа кэша недоступных хост:порт
+BLACKLIST_TTL_SECONDS = 3 * 3600
 
 TEST_URLS = [
     "https://www.gstatic.com/generate_204",
-    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://cp.cloudflare.com/generate_204",
     "https://telegram.org",
     "https://www.youtube.com/generate_204",
 ]
@@ -34,12 +34,11 @@ SPEEDTEST_URLS = [
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
 
-# Обычные сервера vs white list / LTE (в РФ под ТСПУ/мобилками задержки выше)
 MAX_TCP_PING_MS = 900
 TCP_PING_TIMEOUT = 1.2
 TIMEOUT_PER_URL = 6
 SPEEDTEST_MAX_SECONDS = 4.5
-MIN_SPEED_NORMAL_MBPS = 0.3
+MIN_SPEED_NORMAL_MBPS = 0.4
 
 LTE_MAX_TCP_PING_MS = 8000
 LTE_TCP_PING_TIMEOUT = 2.5
@@ -48,14 +47,17 @@ LTE_SPEEDTEST_MAX_SECONDS = 8.0
 MIN_SPEED_LTE_MBPS = 0.05
 
 MIN_SUCCESS = 2
-MAX_CANDIDATES = 120
+MAX_CANDIDATES = 150
 CHECK_WORKERS = 8
 MAX_RUNTIME_SECONDS = 175
 
-# Заведомо проблемные/заблокированные пути WS (как идея ws_patch_blocklist у vlessforu)
-BLOCKED_WS_PATHS = {
-    "/ws-patch",
-}
+# Заведомо заблокированные в РФ SNI / CDN-хосты
+BLOCKED_SNI_KEYWORDS = (
+    "workers.dev",
+    "pages.dev",
+    "herokuapp.com",
+    "ngrok",
+)
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -80,6 +82,10 @@ COUNTRY_MAP = {
     "SG": ("🇸🇬", "Сингапур"),
     "JP": ("🇯🇵", "Япония"),
     "CA": ("🇨🇦", "Канада"),
+    "HK": ("🇭🇰", "Гонконг"),
+    "MD": ("🇲🇩", "Молдова"),
+    "BG": ("🇧🇬", "Болгария"),
+    "RO": ("🇷🇴", "Румыния"),
 }
 
 OPERATORS_MAP = {
@@ -116,6 +122,22 @@ _blacklist_cache: dict[tuple[str, int], int] = {}
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def country_code_to_flag(cc: str) -> str:
+    if not cc or len(cc) != 2 or not cc.isalpha():
+        return "🌐"
+    cc = cc.upper()
+    return chr(ord(cc[0]) + 0x1F1A5) + chr(ord(cc[1]) + 0x1F1A5)
+
+
+def format_country_from_code(cc: str, fallback_name: str = "") -> tuple[str, str]:
+    cc = (cc or "").upper().strip()
+    if cc in COUNTRY_MAP:
+        return COUNTRY_MAP[cc]
+    if len(cc) == 2 and cc.isalpha():
+        return country_code_to_flag(cc), fallback_name or cc
+    return "🌐", fallback_name or "Сервер"
 
 
 def load_blacklist_cache() -> None:
@@ -253,15 +275,45 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
     return None
 
 
+def get_security_type(uri: str) -> str:
+    base = clean_uri(uri)
+    try:
+        p = urlparse(base)
+        if p.scheme in ("vless", "trojan"):
+            q = parse_qs(p.query)
+            sec = (q.get("security", ["none"])[0] or "none").lower()
+            if p.scheme == "trojan" and sec == "none":
+                return "tls"
+            return sec
+        if p.scheme == "vmess":
+            b64 = base[8:]
+            b64 += "=" * (-len(b64) % 4)
+            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            return str(data.get("tls", "none")).lower()
+    except Exception:
+        pass
+    return "none"
+
+
+def is_tspu_compatible(uri: str, is_lte: bool) -> bool:
+    """Отсекает конфиги без шифрования TLS/Reality и с заблокированными в РФ SNI."""
+    if is_lte:
+        return True
+    sec = get_security_type(uri)
+    if sec not in ("reality", "tls"):
+        return False
+    lower = clean_uri(uri).lower()
+    if any(bad in lower for bad in BLOCKED_SNI_KEYWORDS):
+        return False
+    return True
+
+
 def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     network = (query.get("type", ["tcp"])[0] or "tcp").lower()
     security = (query.get("security", ["none"])[0] or "none").lower()
     sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0] or fallback_host)
     fp = unquote(query.get("fp", [""])[0] or "chrome")
     path_hdr = unquote(query.get("path", ["/"])[0] or "/")
-
-    if network == "ws" and path_hdr in BLOCKED_WS_PATHS:
-        return {}
 
     stream: dict = {"network": network}
 
@@ -358,8 +410,6 @@ def uri_to_outbound(uri: str) -> dict | None:
                 return None
             net = str(data.get("net", "tcp")).lower()
             path_val = str(data.get("path", "/") or "/")
-            if net == "ws" and path_val in BLOCKED_WS_PATHS:
-                return None
             stream: dict = {"network": net}
             sni_val = data.get("sni") or data.get("host", "")
             if str(data.get("tls", "")).lower() == "tls":
@@ -469,6 +519,48 @@ def _stop_xray(proc, cfg_path):
             pass
 
 
+def detect_exit_country(proxies: dict, host: str) -> tuple[str, str]:
+    """Определяет реальную страну выхода через сам VPN-туннель (без привязки к DNS раннера)."""
+    # 1. Запрос через прокси на api.country.is (возвращает страну выходного IP)
+    try:
+        r = requests.get("https://api.country.is/", proxies=proxies, timeout=4)
+        if r.ok:
+            cc = r.json().get("country", "")
+            if cc:
+                return format_country_from_code(cc)
+    except Exception:
+        pass
+
+    # 2. Резервный запрос через прокси на ipwho.is
+    try:
+        r = requests.get("https://ipwho.is/", proxies=proxies, timeout=4)
+        if r.ok:
+            data = r.json()
+            cc = data.get("country_code", "")
+            if cc:
+                return format_country_from_code(cc, data.get("country", ""))
+    except Exception:
+        pass
+
+    # 3. Фолбэк по IP входного сервера (если выходной гео-API заблокирован)
+    try:
+        ip = socket.gethostbyname(host)
+        for url, key_cc, key_name in (
+            (f"https://api.country.is/{ip}", "country", ""),
+            (f"https://ipwho.is/{ip}", "country_code", "country"),
+        ):
+            r = requests.get(url, timeout=3)
+            if r.ok:
+                data = r.json()
+                cc = data.get(key_cc, "")
+                if cc:
+                    return format_country_from_code(cc, data.get(key_name, "") if key_name else "")
+    except Exception:
+        pass
+
+    return ("🌐", "Сервер")
+
+
 def measure_speed_mbps(proxies: dict, headers: dict, is_lte: bool) -> float:
     max_seconds = LTE_SPEEDTEST_MAX_SECONDS if is_lte else SPEEDTEST_MAX_SECONDS
     req_timeout = LTE_TIMEOUT_PER_URL if is_lte else TIMEOUT_PER_URL
@@ -500,39 +592,43 @@ def measure_speed_mbps(proxies: dict, headers: dict, is_lte: bool) -> float:
     return 0.0
 
 
-def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
+def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
+    """Возвращает (is_ok, speed_mbps, (flag, country_name))."""
     hp = extract_host_port(uri)
     if not hp:
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
 
     is_lte = is_whitelist_entry(f"{uri} {meta}")
+    if not is_tspu_compatible(uri, is_lte=is_lte):
+        return False, 0.0, ("🌐", "Сервер")
+
     if not is_lte and is_cached_bad(host, port):
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
 
     max_ping = LTE_MAX_TCP_PING_MS if is_lte else MAX_TCP_PING_MS
     ping = tcp_ping(host, port, is_lte=is_lte)
     if ping is None or ping > max_ping:
         if not is_lte:
             mark_cached_bad(host, port)
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
 
     outbound = uri_to_outbound(uri)
     if not outbound:
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
 
     socks_port = get_free_port()
     proc, cfg_path = _spawn_xray(outbound, socks_port)
     if not proc:
-        return False, 0.0
+        return False, 0.0, ("🌐", "Сервер")
 
     try:
         if not wait_for_port(socks_port):
             if not is_lte:
                 mark_cached_bad(host, port)
-            return False, 0.0
+            return False, 0.0, ("🌐", "Сервер")
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{socks_port}",
@@ -567,35 +663,17 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float]:
         if success < MIN_SUCCESS:
             if not is_lte:
                 mark_cached_bad(host, port)
-            return False, 0.0
+            return False, 0.0, ("🌐", "Сервер")
 
         speed = measure_speed_mbps(proxies, headers, is_lte=is_lte)
         min_speed = MIN_SPEED_LTE_MBPS if is_lte else MIN_SPEED_NORMAL_MBPS
         if speed < min_speed:
-            return False, 0.0
-        return True, speed
+            return False, 0.0, ("🌐", "Сервер")
+
+        country_info = detect_exit_country(proxies, host)
+        return True, speed, country_info
     finally:
         _stop_xray(proc, cfg_path)
-
-
-def lookup_country(host: str) -> tuple[str, str]:
-    try:
-        ip = socket.gethostbyname(host)
-        r = requests.get(
-            f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
-            timeout=3,
-        )
-        if r.ok:
-            data = r.json()
-            if data.get("status") == "success":
-                cc = (data.get("countryCode") or "").upper()
-                if cc in COUNTRY_MAP:
-                    return COUNTRY_MAP[cc]
-                country_en = data.get("country") or cc or "Server"
-                return ("🌐", country_en)
-    except Exception:
-        pass
-    return ("🌐", "Сервер")
 
 
 def _fetch_text_with_fallback(url: str, timeout: int = 8) -> str | None:
@@ -606,7 +684,6 @@ def _fetch_text_with_fallback(url: str, timeout: int = 8) -> str | None:
     except Exception:
         pass
 
-    # Фолбэк через первый рабочий узел из текущего sub.txt (как идея fallback_proxy у vlessforu)
     if not os.path.exists(SUB_FILE):
         return None
     try:
@@ -684,19 +761,27 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                 seen_base.add(base_uri)
                 candidates.append((uri_part, combined_meta))
 
+    # Приоритизируем white list и Reality (они лучше всего работают в РФ под ТСПУ)
+    def priority_key(item: tuple[str, str]) -> int:
+        uri, meta = item
+        if is_whitelist_entry(f"{uri} {meta}"):
+            return 0
+        if get_security_type(uri) == "reality":
+            return 1
+        return 2
+
+    candidates.sort(key=priority_key)
     log(f"Collected {len(candidates)} unique candidates.")
     return candidates
 
 
-def format_server_name(uri: str, meta: str) -> str:
+def format_server_name(uri: str, meta: str, country_info: tuple[str, str]) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
     if is_whitelist_entry(combined):
         ops = detect_operators(combined)
         return f"🇪🇺 white list ({ops})"
-    hp = extract_host_port(uri)
-    host = hp[0] if hp else ""
-    flag, country_name = lookup_country(host)
+    flag, country_name = country_info
     return f"{flag} {country_name} {BRAND_TAG}"
 
 
@@ -726,8 +811,8 @@ def main() -> None:
 
     def worker(item: tuple[str, str]):
         uri, meta = item
-        ok, speed = evaluate_config(uri, meta)
-        return uri, meta, ok, speed
+        ok, speed, country_info = evaluate_config(uri, meta)
+        return uri, meta, ok, speed, country_info
 
     with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:
         futures = [pool.submit(worker, c) for c in candidates]
@@ -735,11 +820,11 @@ def main() -> None:
             if time.time() - start_ts > MAX_RUNTIME_SECONDS:
                 log("Reached MAX_RUNTIME_SECONDS limit, stopping.")
                 break
-            uri, meta, ok, speed = fut.result()
+            uri, meta, ok, speed, country_info = fut.result()
             hp = extract_host_port(uri)
             target_str = f"{hp[0]}:{hp[1]}" if hp else uri[:40]
             if ok:
-                title = format_server_name(uri, meta)
+                title = format_server_name(uri, meta, country_info)
                 working.append((clean_uri(uri), title, speed))
                 log(f"[{idx}/{len(candidates)}] OK ({speed:.2f} Mbps) {target_str} -> {title}")
             else:
@@ -747,6 +832,10 @@ def main() -> None:
 
     working.sort(key=lambda x: x[2], reverse=True)
 
+    header_lines = [
+        f"#profile-title: {BRAND_TAG}",
+        "#profile-update-interval: 2",
+    ]
     final_links: list[str] = []
     for idx, (base_uri, title, speed) in enumerate(working):
         final_title = f"{title} ⚡" if idx == 0 else title
@@ -755,7 +844,10 @@ def main() -> None:
         final_links.append(f"{base_uri}#{quote(final_title)}")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(final_links) + ("\n" if final_links else ""))
+        if final_links:
+            f.write("\n".join(header_lines + final_links) + "\n")
+        else:
+            f.write("")
 
     update_readme(len(final_links))
     log(f"Done. Active servers written to {SUB_FILE}: {len(final_links)}")
