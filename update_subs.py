@@ -25,12 +25,13 @@ BLOCKED_SITES = [
     "https://x.com/",
     "https://discord.com/",
 ]
-MIN_PASSED_SITES = 2
+MIN_PASSED_SITES = 3
 SITE_TIMEOUT = 3
-MAX_SERVERS_TO_TEST = 40
-MAX_RUNTIME_SECONDS = 150
+MAX_SERVERS_TO_TEST = 50
+MAX_RUNTIME_SECONDS = 180
 
 COUNTRY_MAP = {
+    "RU": ("🇷🇺", "Россия"),
     "DE": ("🇩🇪", "Германия"),
     "NL": ("🇳🇱", "Нидерланды"),
     "FI": ("🇫🇮", "Финляндия"),
@@ -240,7 +241,16 @@ def build_xray_config(parsed: dict, socks_port: int) -> dict:
     }
 
 
-def check_vless_on_blocked_sites(parsed: dict) -> bool:
+def is_valid_site_response(resp: requests.Response) -> bool:
+    if resp.status_code == 204:
+        return True
+    if resp.status_code == 200:
+        return len(resp.content or b"") > 0
+    return False
+
+
+def check_vless_on_blocked_sites(parsed: dict) -> tuple[bool, float]:
+    """Возвращает (is_ok, avg_latency_ms)."""
     port = get_free_port()
     cfg = build_xray_config(parsed, port)
 
@@ -270,9 +280,12 @@ def check_vless_on_blocked_sites(parsed: dict) -> bool:
         }
 
         passed = 0
+        latencies: list[float] = []
+
         for idx, url in enumerate(BLOCKED_SITES):
-            if idx == 3 and passed == 0:
+            if idx == 2 and passed == 0:
                 break
+            t0 = time.perf_counter()
             try:
                 resp = requests.get(
                     url,
@@ -281,12 +294,16 @@ def check_vless_on_blocked_sites(parsed: dict) -> bool:
                     timeout=SITE_TIMEOUT,
                     allow_redirects=True,
                 )
-                if 200 <= resp.status_code < 500:
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                if is_valid_site_response(resp):
                     passed += 1
+                    latencies.append(elapsed_ms)
             except Exception:
                 continue
 
-        return passed >= MIN_PASSED_SITES
+        if passed >= MIN_PASSED_SITES and latencies:
+            return True, sum(latencies) / len(latencies)
+        return False, float("inf")
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -311,6 +328,8 @@ def lookup_country(host: str) -> tuple[str, str]:
                 cc = (data.get("countryCode") or "").upper()
                 if cc in COUNTRY_MAP:
                     return COUNTRY_MAP[cc]
+                if cc == "RU":
+                    return ("🇷🇺", "Россия")
                 country_en = data.get("country") or cc or "Server"
                 return ("🌐", country_en)
     except Exception:
@@ -401,7 +420,8 @@ def update_readme(count: int) -> None:
 def main() -> None:
     start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_SERVERS_TO_TEST]
-    working_links: list[str] = []
+    # Храним кортежи: (raw_uri, title, latency_ms)
+    working_entries: list[tuple[str, str, float]] = []
 
     for i, (uri, meta) in enumerate(candidates, start=1):
         if time.time() - start_ts > MAX_RUNTIME_SECONDS:
@@ -411,19 +431,33 @@ def main() -> None:
         if not parsed:
             continue
         log(f"[{i}/{len(candidates)}] Checking {parsed['host']}:{parsed['port']}...")
-        if check_vless_on_blocked_sites(parsed):
+        ok, avg_ms = check_vless_on_blocked_sites(parsed)
+        if ok:
             title = format_server_name(parsed, meta)
-            final_uri = f"{parsed['raw']}#{quote(title)}"
-            working_links.append(final_uri)
-            log(f"  -> OK: {title}")
+            working_entries.append((parsed["raw"], title, avg_ms))
+            log(f"  -> OK ({avg_ms:.0f} ms): {title}")
         else:
             log("  -> FAIL")
 
-    with open(SUB_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(working_links) + ("\n" if working_links else ""))
+    fastest_idx = None
+    if working_entries:
+        fastest_idx = min(
+            range(len(working_entries)),
+            key=lambda idx: working_entries[idx][2],
+        )
 
-    update_readme(len(working_links))
-    log(f"Done. Active servers written to {SUB_FILE}: {len(working_links)}")
+    final_links: list[str] = []
+    for idx, (raw_uri, title, avg_ms) in enumerate(working_entries):
+        final_title = f"{title} ⚡" if idx == fastest_idx else title
+        if idx == fastest_idx:
+            log(f"Fastest server: {final_title} ({avg_ms:.0f} ms)")
+        final_links.append(f"{raw_uri}#{quote(final_title)}")
+
+    with open(SUB_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(final_links) + ("\n" if final_links else ""))
+
+    update_readme(len(final_links))
+    log(f"Done. Active servers written to {SUB_FILE}: {len(final_links)}")
 
 
 if __name__ == "__main__":
