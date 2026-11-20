@@ -25,7 +25,6 @@ TEST_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
     "https://www.google.com/generate_204",
-    "https://telegram.org",
 ]
 
 SPEEDTEST_URLS = [
@@ -33,13 +32,15 @@ SPEEDTEST_URLS = [
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
 
+SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
+
 MIN_SUCCESS = 1
-MAX_TCP_PING_MS = 4000
+MAX_TCP_PING_MS = 3500
 TCP_PING_TIMEOUT = 2.5
-TIMEOUT_PER_URL = 10
+TIMEOUT_PER_URL = 8
 SPEEDTEST_MAX_SECONDS = 4.0
 MIN_SPEED_MBPS = 0.01
-MAX_CANDIDATES = 250
+MAX_CANDIDATES = 300
 CHECK_WORKERS = 10
 MAX_RUNTIME_SECONDS = 240
 
@@ -188,15 +189,20 @@ def tcp_ping(host: str, port: int, timeout: float = TCP_PING_TIMEOUT) -> float |
         return None
 
 
-def maybe_b64_decode(text: str) -> str:
-    cleaned = "".join(text.strip().split())
-    if not cleaned or "://" in text:
-        return text
+def _b64_decode_str(s: str) -> str:
+    cleaned = "".join(s.strip().split())
+    cleaned = cleaned.replace("-", "+").replace("_", "/")
     pad = len(cleaned) % 4
     if pad:
         cleaned += "=" * (4 - pad)
+    return base64.b64decode(cleaned, validate=False).decode("utf-8", errors="ignore")
+
+
+def maybe_b64_decode(text: str) -> str:
+    if not text or "://" in text:
+        return text
     try:
-        decoded = base64.b64decode(cleaned, validate=False).decode("utf-8", errors="ignore")
+        decoded = _b64_decode_str(text)
         if "://" in decoded:
             return decoded
     except Exception:
@@ -225,6 +231,39 @@ def clean_uri(uri: str) -> str:
     return uri.split("#", 1)[0].strip()
 
 
+def _parse_ss_parts(base: str) -> tuple[str, str, str, int] | None:
+    body = base[5:]
+    if "@" in body:
+        userinfo, hostport = body.rsplit("@", 1)
+        host_part = hostport.split("/", 1)[0].split("?", 1)[0]
+        if ":" not in host_part:
+            return None
+        host, port_s = host_part.rsplit(":", 1)
+        port = int(port_s)
+        try:
+            decoded_user = _b64_decode_str(userinfo)
+            if ":" in decoded_user:
+                method, password = decoded_user.split(":", 1)
+                return method, password, host, port
+        except Exception:
+            pass
+        if ":" in unquote(userinfo):
+            method, password = unquote(userinfo).split(":", 1)
+            return method, password, host, port
+        return None
+    else:
+        try:
+            decoded = _b64_decode_str(body)
+            if "@" not in decoded:
+                return None
+            creds, hostport = decoded.rsplit("@", 1)
+            method, password = creds.split(":", 1)
+            host, port_s = hostport.rsplit(":", 1)
+            return method, password, host, int(port_s)
+        except Exception:
+            return None
+
+
 def extract_host_port(uri: str) -> tuple[str, int] | None:
     base = clean_uri(uri)
     if len(base) > 8192:
@@ -236,13 +275,17 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
                 return None
             return p.hostname, int(p.port or 443)
         if p.scheme == "vmess":
-            b64 = base[8:]
-            b64 += "=" * (-len(b64) % 4)
-            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            data = json.loads(_b64_decode_str(base[8:]))
             add = data.get("add")
             if not add:
                 return None
             return str(add), int(data.get("port", 443))
+        if p.scheme == "ss":
+            parsed = _parse_ss_parts(base)
+            if not parsed:
+                return None
+            _, _, host, port = parsed
+            return host, port
     except Exception:
         return None
     return None
@@ -271,12 +314,15 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
             "spiderX": unquote(query.get("spx", ["/"])[0] or "/"),
         }
     elif security == "tls":
-        stream["security"] = "tls"
-        stream["tlsSettings"] = {
+        tls_cfg: dict = {
             "serverName": sni,
             "fingerprint": fp,
             "allowInsecure": True,
         }
+        if alpn_raw := unquote(query.get("alpn", [""])[0]):
+            tls_cfg["alpn"] = [x.strip() for x in alpn_raw.split(",") if x.strip()]
+        stream["security"] = "tls"
+        stream["tlsSettings"] = tls_cfg
 
     host_hdr = unquote(query.get("host", [sni])[0] or sni)
 
@@ -341,9 +387,7 @@ def uri_to_outbound(uri: str) -> dict | None:
             }
 
         if base.startswith("vmess://"):
-            b64 = base[8:]
-            b64 += "=" * (-len(b64) % 4)
-            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            data = json.loads(_b64_decode_str(base[8:]))
             add = data.get("add")
             uid = data.get("id")
             if not add or not uid:
@@ -408,6 +452,25 @@ def uri_to_outbound(uri: str) -> dict | None:
                     ]
                 },
                 "streamSettings": stream,
+            }
+
+        if base.startswith("ss://"):
+            parsed = _parse_ss_parts(base)
+            if not parsed:
+                return None
+            method, password, host, port = parsed
+            return {
+                "protocol": "shadowsocks",
+                "settings": {
+                    "servers": [
+                        {
+                            "address": host,
+                            "port": port,
+                            "method": method,
+                            "password": password,
+                        }
+                    ]
+                },
             }
     except Exception:
         return None
@@ -554,30 +617,30 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
     return 0.0
 
 
-def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
+def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str], str]:
     hp = extract_host_port(uri)
     if not hp:
-        return False, 0.0, ("🌍", "Европа")
+        return False, 0.0, ("🌍", "Европа"), "bad_uri"
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
-        return False, 0.0, ("🌍", "Европа")
+        return False, 0.0, ("🌍", "Европа"), "bad_host"
 
     ping = tcp_ping(host, port, timeout=TCP_PING_TIMEOUT)
     if ping is None or ping > MAX_TCP_PING_MS:
-        return False, 0.0, ("🌍", "Европа")
+        return False, 0.0, ("🌍", "Европа"), "tcp_fail"
 
     outbound = uri_to_outbound(uri)
     if not outbound:
-        return False, 0.0, ("🌍", "Европа")
+        return False, 0.0, ("🌍", "Европа"), "bad_outbound"
 
     socks_port = get_free_port()
     proc, cfg_path = _spawn_xray(outbound, socks_port)
     if not proc:
-        return False, 0.0, ("🌍", "Европа")
+        return False, 0.0, ("🌍", "Европа"), "xray_spawn_fail"
 
     try:
         if not wait_for_port(socks_port):
-            return False, 0.0, ("🌍", "Европа")
+            return False, 0.0, ("🌍", "Европа"), "xray_port_fail"
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{socks_port}",
@@ -609,14 +672,14 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
                 continue
 
         if success < MIN_SUCCESS:
-            return False, 0.0, ("🌍", "Европа")
+            return False, 0.0, ("🌍", "Европа"), "http_fail"
 
         speed = measure_speed_mbps(proxies, headers)
         if speed < MIN_SPEED_MBPS:
             speed = 0.01
 
         country_info = resolve_country(host, proxies=proxies)
-        return True, speed, country_info
+        return True, speed, country_info, "ok"
     finally:
         _stop_xray(proc, cfg_path)
 
@@ -630,7 +693,6 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
     candidates: list[tuple[str, str]] = []
     seen_base: set[str] = set()
     current_group_meta = ""
-    schemes = ("vless://", "vmess://", "trojan://")
 
     for line in raw_text.splitlines():
         line = line.strip()
@@ -654,7 +716,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                     sub_txt = maybe_b64_decode(sub_r.text)
                     for sline in sub_txt.splitlines():
                         sline = sline.strip()
-                        if sline.startswith(schemes):
+                        if sline.startswith(SUPPORTED_SCHEMES):
                             frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
                             combined_meta = f"{line_meta} {frag}".strip()
                             base_uri = clean_uri(sline)
@@ -663,7 +725,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                                 candidates.append((sline, combined_meta))
             except Exception:
                 continue
-        elif uri_part.startswith(schemes):
+        elif uri_part.startswith(SUPPORTED_SCHEMES):
             frag = unquote(uri_part.split("#", 1)[1]) if "#" in uri_part else ""
             combined_meta = f"{line_meta} {frag}".strip()
             base_uri = clean_uri(uri_part)
@@ -709,11 +771,12 @@ def main() -> None:
     start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
     working: list[tuple[str, str, float]] = []
+    reasons: dict[str, int] = {}
 
     def worker(item: tuple[str, str]):
         uri, meta = item
-        ok, speed, country_info = evaluate_config(uri, meta)
-        return uri, meta, ok, speed, country_info
+        ok, speed, country_info, reason = evaluate_config(uri, meta)
+        return uri, meta, ok, speed, country_info, reason
 
     with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:
         futures = [pool.submit(worker, c) for c in candidates]
@@ -721,7 +784,8 @@ def main() -> None:
             if time.time() - start_ts > MAX_RUNTIME_SECONDS:
                 log("Reached MAX_RUNTIME_SECONDS limit, stopping.")
                 break
-            uri, meta, ok, speed, country_info = fut.result()
+            uri, meta, ok, speed, country_info, reason = fut.result()
+            reasons[reason] = reasons.get(reason, 0) + 1
             hp = extract_host_port(uri)
             target_str = f"{hp[0]}:{hp[1]}" if hp else uri[:40]
             if ok:
@@ -729,7 +793,13 @@ def main() -> None:
                 working.append((clean_uri(uri), title, speed))
                 log(f"[{idx}/{len(candidates)}] OK ({speed:.2f} Mbps) {target_str} -> {title}")
             else:
-                log(f"[{idx}/{len(candidates)}] FAIL {target_str}")
+                log(f"[{idx}/{len(candidates)}] FAIL ({reason}) {target_str}")
+
+    log(f"Stats: {reasons}")
+
+    if not working:
+        log("No working servers found; keeping existing sub.txt untouched.")
+        return
 
     working.sort(key=lambda x: x[2], reverse=True)
 
@@ -745,10 +815,7 @@ def main() -> None:
         final_links.append(f"{base_uri}#{quote(final_title)}")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
-        if final_links:
-            f.write("\n".join(header_lines + final_links) + "\n")
-        else:
-            f.write("")
+        f.write("\n".join(header_lines + final_links) + "\n")
 
     update_readme(len(final_links))
     log(f"Done. Active servers written to {SUB_FILE}: {len(final_links)}")
