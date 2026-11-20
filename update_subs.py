@@ -33,14 +33,14 @@ SPEEDTEST_URLS = [
 ]
 
 MIN_SUCCESS = 2
-MAX_TCP_PING_MS = 1200
-TCP_PING_TIMEOUT = 1.5
-TIMEOUT_PER_URL = 6
-SPEEDTEST_MAX_SECONDS = 4.5
-MIN_SPEED_MBPS = 0.5
-MAX_CANDIDATES = 150
-CHECK_WORKERS = 8
-MAX_RUNTIME_SECONDS = 175
+MAX_TCP_PING_MS = 2200
+TCP_PING_TIMEOUT = 1.8
+TIMEOUT_PER_URL = 8
+SPEEDTEST_MAX_SECONDS = 4.0
+MIN_SPEED_MBPS = 0.1
+MAX_CANDIDATES = 250
+CHECK_WORKERS = 10
+MAX_RUNTIME_SECONDS = 240
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -99,6 +99,8 @@ WHITELIST_KEYWORDS = (
     "white",
     "wl",
 )
+
+_country_cache: dict[str, tuple[str, str]] = {}
 
 
 def log(msg: str) -> None:
@@ -441,40 +443,47 @@ def _stop_xray(proc, cfg_path):
             pass
 
 
-def detect_exit_country(proxies: dict, host: str) -> tuple[str, str]:
-    try:
-        r = requests.get("https://api.country.is/", proxies=proxies, timeout=4)
-        if r.ok:
-            cc = r.json().get("country", "")
-            if cc:
-                return format_country_from_code(cc)
-    except Exception:
-        pass
+def resolve_country_fast(host: str, proxies: dict | None = None) -> tuple[str, str]:
+    """Определяет страну и флаг с кэшем, чтобы серверы стабильно переименовывались."""
+    if host in _country_cache:
+        return _country_cache[host]
 
-    try:
-        r = requests.get("https://ipwho.is/", proxies=proxies, timeout=4)
-        if r.ok:
-            data = r.json()
-            cc = data.get("country_code", "")
-            if cc:
-                return format_country_from_code(cc, data.get("country", ""))
-    except Exception:
-        pass
-
+    # 1. Быстрая проверка по IP/хосту через ip-api / country.is
     try:
         ip = socket.gethostbyname(host)
-        for url, key_cc, key_name in (
-            (f"https://api.country.is/{ip}", "country", ""),
-            (f"https://ipwho.is/{ip}", "country_code", "country"),
-        ):
-            r = requests.get(url, timeout=3)
-            if r.ok:
-                data = r.json()
-                cc = data.get(key_cc, "")
-                if cc:
-                    return format_country_from_code(cc, data.get(key_name, "") if key_name else "")
+        if ip in _country_cache:
+            _country_cache[host] = _country_cache[ip]
+            return _country_cache[host]
+
+        r = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
+            timeout=2.5,
+        )
+        if r.ok:
+            data = r.json()
+            if data.get("status") == "success":
+                res = format_country_from_code(
+                    data.get("countryCode", ""),
+                    data.get("country", ""),
+                )
+                _country_cache[host] = res
+                _country_cache[ip] = res
+                return res
     except Exception:
         pass
+
+    # 2. Фолбэк через сам прокси (реальный выходной IP)
+    if proxies:
+        try:
+            r = requests.get("https://api.country.is/", proxies=proxies, timeout=4)
+            if r.ok:
+                cc = r.json().get("country", "")
+                if cc:
+                    res = format_country_from_code(cc)
+                    _country_cache[host] = res
+                    return res
+        except Exception:
+            pass
 
     return ("🌐", "Сервер")
 
@@ -500,7 +509,7 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
                     if time.perf_counter() - start >= SPEEDTEST_MAX_SECONDS:
                         break
             elapsed = time.perf_counter() - start
-            if elapsed >= 0.25 and downloaded >= 65536:
+            if elapsed >= 0.2 and downloaded >= 16384:
                 return (downloaded * 8.0 / (1024 * 1024)) / elapsed
         except requests.RequestException:
             continue
@@ -516,11 +525,7 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
         return False, 0.0, ("🌐", "Сервер")
 
     is_lte = is_whitelist_entry(f"{uri} {meta}")
-    sec = get_security_type(uri)
-    if not is_lte and sec not in ("reality", "tls"):
-        return False, 0.0, ("🌐", "Сервер")
-
-    max_ping = 6000 if is_lte else MAX_TCP_PING_MS
+    max_ping = 7000 if is_lte else MAX_TCP_PING_MS
     ping = tcp_ping(host, port, timeout=2.5 if is_lte else TCP_PING_TIMEOUT)
     if ping is None or ping > max_ping:
         return False, 0.0, ("🌐", "Сервер")
@@ -561,7 +566,7 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
                     timeout=(4.0, url_timeout),
                 )
                 if r.status_code in (200, 204):
-                    if r.status_code == 204 or len(r.content or b"") > 16:
+                    if r.status_code == 204 or len(r.content or b"") > 0:
                         success += 1
                         if success >= MIN_SUCCESS:
                             break
@@ -572,11 +577,11 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str]]:
             return False, 0.0, ("🌐", "Сервер")
 
         speed = measure_speed_mbps(proxies, headers)
-        min_speed = 0.05 if is_lte else MIN_SPEED_MBPS
+        min_speed = 0.02 if is_lte else MIN_SPEED_MBPS
         if speed < min_speed:
             return False, 0.0, ("🌐", "Сервер")
 
-        country_info = detect_exit_country(proxies, host)
+        country_info = resolve_country_fast(host, proxies=proxies)
         return True, speed, country_info
     finally:
         _stop_xray(proc, cfg_path)
