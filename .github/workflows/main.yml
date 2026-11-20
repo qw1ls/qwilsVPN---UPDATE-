@@ -1,47 +1,50 @@
-name: Auto Update VPN Subscription
+name: Update VPN Subscription
 
 on:
   schedule:
-    - cron: '0 3 * * *'
-  workflow_dispatch:
+    - cron: "0 */2 * * *" # каждые 2 часа
+  workflow_dispatch: # ручной запуск из вкладки Actions
+
+permissions:
+  contents: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: write
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies and Xray-core
         run: |
           python -m pip install --upgrade pip
-          pip install requests "requests[socks]" PySocks
+          pip install requests
+          curl -sL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip
+          unzip -q /tmp/xray.zip -d /usr/local/bin/xray_bin
+          chmod +x /usr/local/bin/xray_bin/xray
+          ln -sf /usr/local/bin/xray_bin/xray /usr/local/bin/xray
+          xray -version
 
-      - name: Install Xray core explicitly
+      - name: Run subscription checker
+        run: python main.py
+
+      - name: Commit and push updated files
         run: |
-          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -o xray.zip xray -d .
-          chmod +x ./xray
-          ./xray version
-          echo "$PWD" >> $GITHUB_PATH
-
-      - name: Run updater script
-        run: python3 update_subs.py
-
-      - name: Commit and Push changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git status
-          git add sub.txt README.md
-          git commit -m "Auto-update subscription files" || echo "No changes to commit"
-          git push origin main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sub.txt README.md || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update sub.txt [skip ci]"
+            git push
+          fi
