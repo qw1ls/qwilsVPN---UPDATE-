@@ -35,11 +35,11 @@ SPEEDTEST_URLS = [
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
 
 MIN_SUCCESS = 1
-MAX_TCP_PING_MS = 3500
+MAX_TCP_PING_MS = 4500
 TCP_PING_TIMEOUT = 2.5
-TIMEOUT_PER_URL = 8
+TIMEOUT_PER_URL = 9
 SPEEDTEST_MAX_SECONDS = 4.0
-MIN_SPEED_MBPS = 0.01
+MIN_SPEED_MBPS = 0.05
 MAX_CANDIDATES = 300
 CHECK_WORKERS = 10
 MAX_RUNTIME_SECONDS = 240
@@ -676,7 +676,7 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str], 
 
         speed = measure_speed_mbps(proxies, headers)
         if speed < MIN_SPEED_MBPS:
-            speed = 0.01
+            return False, 0.0, ("🌍", "Европа"), "slow"
 
         country_info = resolve_country(host, proxies=proxies)
         return True, speed, country_info, "ok"
