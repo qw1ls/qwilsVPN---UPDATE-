@@ -35,13 +35,14 @@ SPEEDTEST_URLS = [
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
 
 MIN_SUCCESS = 1
-MAX_TCP_PING_MS = 4500
-TCP_PING_TIMEOUT = 2.5
-TIMEOUT_PER_URL = 9
-SPEEDTEST_MAX_SECONDS = 4.0
+MAX_TCP_PING_MS = 1500
+MAX_LATENCY_MS = 1200
+TCP_PING_TIMEOUT = 1.6
+TIMEOUT_PER_URL = 5.0
+SPEEDTEST_MAX_SECONDS = 3.5
 MIN_SPEED_MBPS = 0.05
 MAX_CANDIDATES = 300
-CHECK_WORKERS = 10
+CHECK_WORKERS = 8
 MAX_RUNTIME_SECONDS = 240
 
 COUNTRY_MAP = {
@@ -166,7 +167,7 @@ def get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 3.5) -> bool:
+def wait_for_port(port: int, timeout: float = 3.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -175,7 +176,7 @@ def wait_for_port(port: int, timeout: float = 3.5) -> bool:
                 s.connect(("127.0.0.1", port))
                 return True
         except OSError:
-            time.sleep(0.08)
+            time.sleep(0.06)
     return False
 
 
@@ -532,7 +533,7 @@ def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
             ("https://ipwho.is/", "country_code", "country"),
         ):
             try:
-                r = requests.get(url, proxies=proxies, timeout=4)
+                r = requests.get(url, proxies=proxies, timeout=3.5)
                 if r.ok:
                     data = r.json()
                     cc = data.get(cc_key, "")
@@ -596,7 +597,7 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
                 url,
                 proxies=proxies,
                 headers=headers,
-                timeout=(4.0, TIMEOUT_PER_URL),
+                timeout=(3.0, TIMEOUT_PER_URL),
                 stream=True,
             ) as r:
                 if r.status_code != 200:
@@ -617,30 +618,30 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
     return 0.0
 
 
-def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str], str]:
+def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str, str], str]:
     hp = extract_host_port(uri)
     if not hp:
-        return False, 0.0, ("🌍", "Европа"), "bad_uri"
+        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
-        return False, 0.0, ("🌍", "Европа"), "bad_host"
+        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_host"
 
     ping = tcp_ping(host, port, timeout=TCP_PING_TIMEOUT)
     if ping is None or ping > MAX_TCP_PING_MS:
-        return False, 0.0, ("🌍", "Европа"), "tcp_fail"
+        return False, 0.0, 9999.0, ("🌍", "Европа"), "tcp_fail"
 
     outbound = uri_to_outbound(uri)
     if not outbound:
-        return False, 0.0, ("🌍", "Европа"), "bad_outbound"
+        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
 
     socks_port = get_free_port()
     proc, cfg_path = _spawn_xray(outbound, socks_port)
     if not proc:
-        return False, 0.0, ("🌍", "Европа"), "xray_spawn_fail"
+        return False, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
 
     try:
         if not wait_for_port(socks_port):
-            return False, 0.0, ("🌍", "Европа"), "xray_port_fail"
+            return False, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{socks_port}",
@@ -655,31 +656,39 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, tuple[str, str], 
         }
 
         success = 0
+        latencies: list[float] = []
         for url in TEST_URLS:
             try:
+                t0 = time.perf_counter()
                 r = requests.get(
                     url,
                     proxies=proxies,
                     headers=headers,
-                    timeout=(4.0, TIMEOUT_PER_URL),
+                    timeout=(3.0, TIMEOUT_PER_URL),
                 )
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 if r.status_code in (200, 204):
                     if r.status_code == 204 or len(r.content or b"") > 0:
                         success += 1
+                        latencies.append(elapsed_ms)
                         if success >= MIN_SUCCESS:
                             break
             except requests.RequestException:
                 continue
 
-        if success < MIN_SUCCESS:
-            return False, 0.0, ("🌍", "Европа"), "http_fail"
+        if success < MIN_SUCCESS or not latencies:
+            return False, 0.0, 9999.0, ("🌍", "Европа"), "http_fail"
+
+        best_latency = min(latencies)
+        if best_latency > MAX_LATENCY_MS:
+            return False, 0.0, best_latency, ("🌍", "Европа"), "high_ping"
 
         speed = measure_speed_mbps(proxies, headers)
         if speed < MIN_SPEED_MBPS:
-            return False, 0.0, ("🌍", "Европа"), "slow"
+            return False, 0.0, best_latency, ("🌍", "Европа"), "slow"
 
         country_info = resolve_country(host, proxies=proxies)
-        return True, speed, country_info, "ok"
+        return True, speed, best_latency, country_info, "ok"
     finally:
         _stop_xray(proc, cfg_path)
 
@@ -737,16 +746,19 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
     return candidates
 
 
-def format_server_name(uri: str, meta: str, country_info: tuple[str, str]) -> str:
+def format_server_name(
+    uri: str, meta: str, country_info: tuple[str, str], latency_ms: float
+) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
+    ping_suffix = f"[{int(round(latency_ms))}ms]"
     if is_whitelist_entry(combined):
         ops = detect_operators(combined)
-        return f"🇪🇺 white list ({ops}) {BRAND_TAG}"
+        return f"🇪🇺 white list ({ops}) {ping_suffix} {BRAND_TAG}"
     flag, country_name = country_info
     flag = flag or "🌍"
     country_name = country_name or "Европа"
-    return f"{flag} {country_name} {BRAND_TAG}"
+    return f"{flag} {country_name} {ping_suffix} {BRAND_TAG}"
 
 
 def update_readme(count: int) -> None:
@@ -770,13 +782,13 @@ def update_readme(count: int) -> None:
 def main() -> None:
     start_ts = time.time()
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
-    working: list[tuple[str, str, float]] = []
+    working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
 
     def worker(item: tuple[str, str]):
         uri, meta = item
-        ok, speed, country_info, reason = evaluate_config(uri, meta)
-        return uri, meta, ok, speed, country_info, reason
+        ok, speed, latency_ms, country_info, reason = evaluate_config(uri, meta)
+        return uri, meta, ok, speed, latency_ms, country_info, reason
 
     with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:
         futures = [pool.submit(worker, c) for c in candidates]
@@ -784,14 +796,17 @@ def main() -> None:
             if time.time() - start_ts > MAX_RUNTIME_SECONDS:
                 log("Reached MAX_RUNTIME_SECONDS limit, stopping.")
                 break
-            uri, meta, ok, speed, country_info, reason = fut.result()
+            uri, meta, ok, speed, latency_ms, country_info, reason = fut.result()
             reasons[reason] = reasons.get(reason, 0) + 1
             hp = extract_host_port(uri)
             target_str = f"{hp[0]}:{hp[1]}" if hp else uri[:40]
             if ok:
-                title = format_server_name(uri, meta, country_info)
-                working.append((clean_uri(uri), title, speed))
-                log(f"[{idx}/{len(candidates)}] OK ({speed:.2f} Mbps) {target_str} -> {title}")
+                title = format_server_name(uri, meta, country_info, latency_ms)
+                working.append((clean_uri(uri), title, speed, latency_ms))
+                log(
+                    f"[{idx}/{len(candidates)}] OK ({speed:.2f} Mbps, {latency_ms:.0f}ms) "
+                    f"{target_str} -> {title}"
+                )
             else:
                 log(f"[{idx}/{len(candidates)}] FAIL ({reason}) {target_str}")
 
@@ -801,17 +816,18 @@ def main() -> None:
         log("No working servers found; keeping existing sub.txt untouched.")
         return
 
-    working.sort(key=lambda x: x[2], reverse=True)
+    # Сортируем по скорости (по убыванию) и задержке (по возрастанию)
+    working.sort(key=lambda x: (-x[2], x[3]))
 
     header_lines = [
         f"#profile-title: {BRAND_TAG}",
         "#profile-update-interval: 2",
     ]
     final_links: list[str] = []
-    for idx, (base_uri, title, speed) in enumerate(working):
+    for idx, (base_uri, title, speed, latency_ms) in enumerate(working):
         final_title = f"{title} ⚡" if idx == 0 else title
         if idx == 0:
-            log(f"Fastest server: {final_title} ({speed:.2f} Mbps)")
+            log(f"Fastest server: {final_title} ({speed:.2f} Mbps, {latency_ms:.0f}ms)")
         final_links.append(f"{base_uri}#{quote(final_title)}")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
