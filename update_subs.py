@@ -13,13 +13,14 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SOURCES_URL = (
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/"
     "refs/heads/main/sources.txt"
 )
 BRAND_TAG = "@qw1lsVPN"
-SUB_FILE = "sub.txt"
-README_FILE = "README.md"
+SUB_FILE = os.path.join(BASE_DIR, "sub.txt")
+README_FILE = os.path.join(BASE_DIR, "README.md")
 
 TEST_URLS = [
     "https://www.gstatic.com/generate_204",
@@ -35,11 +36,11 @@ SPEEDTEST_URLS = [
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
 
 MIN_SUCCESS = 1
-MAX_TCP_PING_MS = 1500
+MAX_TCP_PING_MS = 1200
 MAX_LATENCY_MS = 1200
-TCP_PING_TIMEOUT = 1.6
-TIMEOUT_PER_URL = 5.0
-SPEEDTEST_MAX_SECONDS = 3.5
+TCP_PING_TIMEOUT = 1.3
+TIMEOUT_PER_URL = 2.0
+SPEEDTEST_MAX_SECONDS = 3.0
 MIN_SPEED_MBPS = 0.05
 MAX_CANDIDATES = 300
 CHECK_WORKERS = 8
@@ -533,7 +534,7 @@ def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
             ("https://ipwho.is/", "country_code", "country"),
         ):
             try:
-                r = requests.get(url, proxies=proxies, timeout=3.5)
+                r = requests.get(url, proxies=proxies, timeout=2.5)
                 if r.ok:
                     data = r.json()
                     cc = data.get(cc_key, "")
@@ -571,7 +572,7 @@ def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
         ]
         for url, extractor in providers:
             try:
-                r = requests.get(url, timeout=3)
+                r = requests.get(url, timeout=2.5)
                 if r.ok:
                     cc, cname = extractor(r.json())
                     if cc:
@@ -597,7 +598,7 @@ def measure_speed_mbps(proxies: dict, headers: dict) -> float:
                 url,
                 proxies=proxies,
                 headers=headers,
-                timeout=(3.0, TIMEOUT_PER_URL),
+                timeout=(2.5, 5.0),
                 stream=True,
             ) as r:
                 if r.status_code != 200:
@@ -664,7 +665,7 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str,
                     url,
                     proxies=proxies,
                     headers=headers,
-                    timeout=(3.0, TIMEOUT_PER_URL),
+                    timeout=(2.0, TIMEOUT_PER_URL),
                 )
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
                 if r.status_code in (200, 204):
@@ -781,6 +782,7 @@ def update_readme(count: int) -> None:
 
 def main() -> None:
     start_ts = time.time()
+    log(f"Target output file: {SUB_FILE} (max ping: {MAX_LATENCY_MS}ms)")
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
     working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
@@ -813,10 +815,9 @@ def main() -> None:
     log(f"Stats: {reasons}")
 
     if not working:
-        log("No working servers found; keeping existing sub.txt untouched.")
+        log(f"No working servers under {MAX_LATENCY_MS}ms found; keeping existing {SUB_FILE}.")
         return
 
-    # Сортируем по скорости (по убыванию) и задержке (по возрастанию)
     working.sort(key=lambda x: (-x[2], x[3]))
 
     header_lines = [
