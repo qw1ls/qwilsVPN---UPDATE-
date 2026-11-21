@@ -34,15 +34,15 @@ SPEEDTEST_URLS = [
 
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
 
-MAX_TCP_PING_MS = 2500
-MAX_LATENCY_MS = 1500
-MIN_SPEED_MBPS = 0.05
-TCP_PING_TIMEOUT = 1.8
-HTTP_TIMEOUT = 5.0
+MAX_TCP_PING_MS = 3000
+MAX_LATENCY_MS = 2500
+TCP_PING_TIMEOUT = 2.0
+HTTP_TIMEOUT = 6.0
 SPEEDTEST_MAX_SECONDS = 3.5
-MAX_CANDIDATES = 300
-CHECK_WORKERS = 10
-MAX_RUNTIME_SECONDS = 240
+MAX_CANDIDATES = 1500
+SOURCE_FETCH_WORKERS = 12
+CHECK_WORKERS = 12
+MAX_RUNTIME_SECONDS = 300
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -532,7 +532,7 @@ def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
             ("https://ipwho.is/", "country_code", "country"),
         ):
             try:
-                r = requests.get(url, proxies=proxies, timeout=3.0)
+                r = requests.get(url, proxies=proxies, timeout=2.5)
                 if r.ok:
                     data = r.json()
                     cc = data.get(cc_key, "")
@@ -588,8 +588,8 @@ def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
 
 def measure_traffic_mbps_and_ms(
     proxies: dict, headers: dict
-) -> tuple[float | None, float | None]:
-    """Измеряет реальную задержку (ms) и скорость скачивания трафика (Mbps) через прокси."""
+) -> tuple[float, float | None]:
+    """Проверяет живой трафик через прокси: возвращает (mbps, best_ms)."""
     latencies: list[float] = []
     for url in LATENCY_URLS:
         try:
@@ -598,15 +598,16 @@ def measure_traffic_mbps_and_ms(
             ms = (time.perf_counter() - t0) * 1000.0
             if r.status_code in (200, 204):
                 latencies.append(ms)
+                break
         except requests.RequestException:
             continue
 
     if not latencies:
-        return None, None
+        return 0.0, None
 
     best_ms = min(latencies)
     if best_ms > MAX_LATENCY_MS:
-        return None, best_ms
+        return 0.0, best_ms
 
     speeds: list[float] = []
     for url in SPEEDTEST_URLS:
@@ -636,7 +637,8 @@ def measure_traffic_mbps_and_ms(
         except requests.RequestException:
             continue
 
-    return None, best_ms
+    # Пропуск трафика по generate_204 есть, но спидтест не успел — оставляем как живой узел
+    return 0.0, best_ms
 
 
 def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str, str], str]:
@@ -681,13 +683,28 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str,
             return False, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic_ping"
         if ms > MAX_LATENCY_MS:
             return False, 0.0, ms, ("🌍", "Европа"), "high_ms"
-        if mbps is None or mbps < MIN_SPEED_MBPS:
-            return False, 0.0, ms, ("🌍", "Европа"), "no_traffic_mbps"
 
         country_info = resolve_country(host, proxies=proxies)
         return True, mbps, ms, country_info, "ok"
     finally:
         _stop_xray(proc, cfg_path)
+
+
+def _fetch_single_sub(url: str, line_meta: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    try:
+        sub_r = requests.get(url, timeout=6)
+        if sub_r.ok:
+            sub_txt = maybe_b64_decode(sub_r.text)
+            for sline in sub_txt.splitlines():
+                sline = sline.strip()
+                if sline.startswith(SUPPORTED_SCHEMES):
+                    frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
+                    combined_meta = f"{line_meta} {frag}".strip()
+                    found.append((sline, combined_meta))
+    except Exception:
+        pass
+    return found
 
 
 def collect_candidates_from_sources() -> list[tuple[str, str]]:
@@ -697,6 +714,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
     raw_text = maybe_b64_decode(resp.text)
 
     candidates: list[tuple[str, str]] = []
+    sub_tasks: list[tuple[str, str]] = []
     seen_base: set[str] = set()
     current_group_meta = ""
 
@@ -716,21 +734,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
             line_meta = f"{current_group_meta} {parts[1].strip()}".strip()
 
         if uri_part.startswith(("http://", "https://")):
-            try:
-                sub_r = requests.get(uri_part, timeout=7)
-                if sub_r.ok:
-                    sub_txt = maybe_b64_decode(sub_r.text)
-                    for sline in sub_txt.splitlines():
-                        sline = sline.strip()
-                        if sline.startswith(SUPPORTED_SCHEMES):
-                            frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
-                            combined_meta = f"{line_meta} {frag}".strip()
-                            base_uri = clean_uri(sline)
-                            if base_uri not in seen_base:
-                                seen_base.add(base_uri)
-                                candidates.append((sline, combined_meta))
-            except Exception:
-                continue
+            sub_tasks.append((uri_part, line_meta))
         elif uri_part.startswith(SUPPORTED_SCHEMES):
             frag = unquote(uri_part.split("#", 1)[1]) if "#" in uri_part else ""
             combined_meta = f"{line_meta} {frag}".strip()
@@ -739,7 +743,17 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                 seen_base.add(base_uri)
                 candidates.append((uri_part, combined_meta))
 
-    log(f"Collected {len(candidates)} unique candidates.")
+    if sub_tasks:
+        with ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as pool:
+            futs = [pool.submit(_fetch_single_sub, u, m) for u, m in sub_tasks]
+            for fut in as_completed(futs):
+                for sline, combined_meta in fut.result():
+                    base_uri = clean_uri(sline)
+                    if base_uri not in seen_base:
+                        seen_base.add(base_uri)
+                        candidates.append((sline, combined_meta))
+
+    log(f"Collected {len(candidates)} unique candidates (from {len(sub_tasks)} sub URLs).")
     return candidates
 
 
@@ -748,7 +762,8 @@ def format_server_name(
 ) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
-    metrics = f"[{mbps:.1f}Mbps | {int(round(ms))}ms]"
+    speed_part = f"{mbps:.1f}Mbps" if mbps > 0 else "live"
+    metrics = f"[{speed_part} | {int(round(ms))}ms]"
     if is_whitelist_entry(combined):
         ops = detect_operators(combined)
         return f"🇪🇺 white list ({ops}) {metrics} {BRAND_TAG}"
@@ -778,7 +793,7 @@ def update_readme(count: int) -> None:
 
 def main() -> None:
     start_ts = time.time()
-    log(f"Writing to {SUB_FILE} | max_ms={MAX_LATENCY_MS}, min_mbps={MIN_SPEED_MBPS}")
+    log(f"Writing to {SUB_FILE} | max_ms={MAX_LATENCY_MS}, max_candidates={MAX_CANDIDATES}")
     candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
     working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
@@ -811,7 +826,7 @@ def main() -> None:
         log("0 servers passed traffic check; keeping existing sub.txt so subscription is not wiped.")
         return
 
-    # Сначала быстрый трафик (Mbps), при равной скорости — меньшая задержка (ms)
+    # Сначала узлы с измеренной скоростью по убыванию, затем по наименьшей задержке (ms)
     working.sort(key=lambda x: (-x[2], x[3]))
 
     header_lines = [
