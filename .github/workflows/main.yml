@@ -35,7 +35,7 @@ jobs:
           xray -version
 
       - name: Run subscription checker
-        run: python main.py
+        run: python update_subs.py
 
       - name: Commit and push updated files
         run: |
