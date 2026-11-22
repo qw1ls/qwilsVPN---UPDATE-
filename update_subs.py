@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
@@ -23,7 +23,7 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = os.path.join(BASE_DIR, "sub.txt")
 README_FILE = os.path.join(BASE_DIR, "README.md")
 
-TEST_URLS = [
+LATENCY_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
     "https://www.google.com/generate_204",
@@ -42,9 +42,9 @@ TCP_PING_TIMEOUT = 2.2
 HTTP_TIMEOUT = 6.0
 SPEEDTEST_MAX_SECONDS = 3.0
 MAX_CANDIDATES = 800
-SOURCE_FETCH_WORKERS = 12
-CHECK_WORKERS = 12
-MAX_CHECK_PHASE_SECONDS = 210
+SOURCE_FETCH_WORKERS = 10
+CHECK_WORKERS = 6
+MAX_CHECK_PHASE_SECONDS = 220
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -188,12 +188,12 @@ def get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 2.5) -> bool:
+def wait_for_port(port: int, timeout: float = 4.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.25)
+                s.settimeout(0.3)
                 s.connect(("127.0.0.1", port))
                 return True
         except OSError:
@@ -223,13 +223,11 @@ def _b64_decode_str(s: str) -> str:
 
 
 def extract_uris_from_blob(text: str) -> list[str]:
-    """Вытаскивает все vless/vmess/trojan/ss ссылки из plain-текста, Base64 и JSON."""
     if not text:
         return []
     found: list[str] = []
     found.extend(URI_REGEX.findall(text))
 
-    # Пробуем целиком как Base64
     try:
         decoded = _b64_decode_str(text)
         if "://" in decoded:
@@ -237,7 +235,6 @@ def extract_uris_from_blob(text: str) -> list[str]:
     except Exception:
         pass
 
-    # Пробуем как JSON (включая вложенные base64-поля)
     try:
         data = json.loads(text)
 
@@ -545,13 +542,14 @@ def _spawn_xray(outbound: dict, socks_port: int):
     config = {
         "inbounds": [
             {
+                "listen": "127.0.0.1",
                 "port": socks_port,
                 "protocol": "socks",
                 "settings": {"udp": False},
             }
         ],
         "outbounds": [outbound],
-        "log": {"loglevel": "warning"},
+        "log": {"loglevel": "none"},
     }
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -626,7 +624,6 @@ def resolve_country(host: str) -> tuple[str, str]:
 
 
 def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None]:
-    """Проверяет проход трафика через xray: сначала generate_204 (ms), затем замер Mbps."""
     latencies: list[float] = []
     for url in LATENCY_URLS:
         try:
@@ -689,38 +686,41 @@ def evaluate_xray_traffic(
     item: tuple[str, str, float],
 ) -> tuple[bool, str, str, float, float, tuple[str, str], str]:
     uri, meta, _ = item
-    hp = extract_host_port(uri)
-    if not hp:
-        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
-    host, _ = hp
-
-    outbound = uri_to_outbound(uri)
-    if not outbound:
-        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
-
-    socks_port = get_free_port()
-    proc, cfg_path = _spawn_xray(outbound, socks_port)
-    if not proc:
-        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
-
     try:
-        if not wait_for_port(socks_port):
-            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
+        hp = extract_host_port(uri)
+        if not hp:
+            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
+        host, _ = hp
 
-        proxies = {
-            "http": f"socks5://127.0.0.1:{socks_port}",
-            "https": f"socks5://127.0.0.1:{socks_port}",
-        }
-        mbps, ms = measure_traffic_mbps_and_ms(proxies)
-        if ms is None:
-            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic_ping"
-        if ms > MAX_LATENCY_MS:
-            return False, uri, meta, 0.0, ms, ("🌍", "Европа"), "high_ms"
+        outbound = uri_to_outbound(uri)
+        if not outbound:
+            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
 
-        country_info = resolve_country(host)
-        return True, uri, meta, mbps, ms, country_info, "ok"
-    finally:
-        _stop_xray(proc, cfg_path)
+        socks_port = get_free_port()
+        proc, cfg_path = _spawn_xray(outbound, socks_port)
+        if not proc:
+            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
+
+        try:
+            if not wait_for_port(socks_port):
+                return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
+
+            proxies = {
+                "http": f"socks5://127.0.0.1:{socks_port}",
+                "https": f"socks5://127.0.0.1:{socks_port}",
+            }
+            mbps, ms = measure_traffic_mbps_and_ms(proxies)
+            if ms is None:
+                return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic_ping"
+            if ms > MAX_LATENCY_MS:
+                return False, uri, meta, 0.0, ms, ("🌍", "Европа"), "high_ms"
+
+            country_info = resolve_country(host)
+            return True, uri, meta, mbps, ms, country_info, "ok"
+        finally:
+            _stop_xray(proc, cfg_path)
+    except Exception:
+        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "worker_error"
 
 
 def _fetch_single_sub(url: str, line_meta: str) -> list[tuple[str, str]]:
@@ -843,9 +843,8 @@ def main() -> None:
     start_ts = time.time()
     all_candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
 
-    # Фаза 1: быстрый TCP-пинг в 30 потоков (как в vlessforu)
     tcp_alive: list[tuple[str, str, float]] = []
-    with ThreadPoolExecutor(max_workers=30) as pool:
+    with ThreadPoolExecutor(max_workers=24) as pool:
         futs = [pool.submit(prefilter_tcp, item) for item in all_candidates]
         for fut in as_completed(futs):
             res = fut.result()
@@ -855,7 +854,6 @@ def main() -> None:
     tcp_alive.sort(key=lambda x: x[2])
     log(f"Phase 1 TCP alive: {len(tcp_alive)} / {len(all_candidates)}")
 
-    # Фаза 2: реальная проверка трафика (ms + Mbps) через xray
     working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
 
@@ -883,7 +881,7 @@ def main() -> None:
 
     log(f"Stats: {reasons}")
 
-    now_str = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
+    now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     header_lines = [
         f"#profile-title: {BRAND_TAG}",
         "#profile-update-interval: 2",
