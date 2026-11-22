@@ -6,6 +6,7 @@ import signal
 import socket
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +24,18 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = os.path.join(BASE_DIR, "sub.txt")
 README_FILE = os.path.join(BASE_DIR, "README.md")
 
+# Лимит задержки (мс) — по запросу до 1200 мс
+MAX_PING_MS = 1200
+MIN_SPEED_MBPS = 0.01
+
+TCP_TIMEOUT = 2.0
+HTTP_TIMEOUT = 5.0
+SPEEDTEST_MAX_SECONDS = 3.0
+MAX_CANDIDATES = 800
+SOURCE_WORKERS = 10
+CHECK_WORKERS = 8
+MAX_PHASE_SECONDS = 220
+
 LATENCY_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
@@ -35,17 +48,6 @@ SPEEDTEST_URLS = [
 ]
 
 URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
-
-MAX_TCP_PING_MS = 1200
-MAX_LATENCY_MS = 1200
-MIN_SPEED_MBPS = 0.01
-TCP_PING_TIMEOUT = 2.0
-HTTP_TIMEOUT = 6.0
-SPEEDTEST_MAX_SECONDS = 3.5
-MAX_CANDIDATES = 800
-SOURCE_FETCH_WORKERS = 10
-CHECK_WORKERS = 6
-MAX_CHECK_PHASE_SECONDS = 220
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -143,6 +145,13 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def check_socks_support() -> None:
+    try:
+        import socks  # noqa: F401
+    except ImportError:
+        log("WARNING: PySocks not installed. Install with: pip install requests[socks]")
+
+
 def resolve_host(host: str) -> str | None:
     if not host:
         return None
@@ -202,7 +211,7 @@ def wait_for_port(port: int, timeout: float = 4.0) -> bool:
     return False
 
 
-def tcp_ping(host: str, port: int, timeout: float = TCP_PING_TIMEOUT) -> float | None:
+def tcp_ping(host: str, port: int, timeout: float = TCP_TIMEOUT) -> float | None:
     target = resolve_host(host) or host
     try:
         start = time.perf_counter()
@@ -563,7 +572,7 @@ def _spawn_xray(outbound: dict, socks_port: int):
             ["xray", "-config", cfg_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
         return proc, cfg_path
     except OSError:
@@ -573,7 +582,10 @@ def _spawn_xray(outbound: dict, socks_port: int):
 def _stop_xray(proc, cfg_path):
     if proc:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            if hasattr(os, "killpg"):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
         except OSError:
             pass
         try:
@@ -628,7 +640,7 @@ def resolve_country(host: str) -> tuple[str, str]:
 
 
 def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None, str]:
-    """Проверяет живой трафик через xray: возвращает (mbps, best_ms, reason)."""
+    """Проверяет трафик через SOCKS5 прокси xray: возвращает (mbps, ms, reason)."""
     latencies: list[float] = []
     for url in LATENCY_URLS:
         try:
@@ -638,14 +650,14 @@ def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None, str
             if r.status_code in (200, 204):
                 latencies.append(ms)
                 break
-        except requests.RequestException:
+        except Exception:
             continue
 
     if not latencies:
         return 0.0, None, "no_traffic"
 
     best_ms = min(latencies)
-    if best_ms > MAX_LATENCY_MS:
+    if best_ms > MAX_PING_MS:
         return 0.0, best_ms, "high_ms"
 
     speeds: list[float] = []
@@ -667,7 +679,7 @@ def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None, str
                         break
             if speeds:
                 return statistics.median(speeds), best_ms, "ok"
-        except requests.RequestException:
+        except Exception:
             continue
 
     return 0.0, best_ms, "no_speed"
@@ -681,8 +693,8 @@ def prefilter_tcp(item: tuple[str, str]) -> tuple[str, str, float] | None:
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
         return None
-    ping = tcp_ping(host, port, timeout=TCP_PING_TIMEOUT)
-    if ping is None or ping > MAX_TCP_PING_MS:
+    ping = tcp_ping(host, port, timeout=TCP_TIMEOUT)
+    if ping is None or ping > MAX_PING_MS:
         return None
     return uri, meta, ping
 
@@ -711,13 +723,13 @@ def evaluate_xray_traffic(
                 return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
 
             proxies = {
-                "http": f"socks5h://127.0.0.1:{socks_port}",
-                "https": f"socks5h://127.0.0.1:{socks_port}",
+                "http": f"socks5://127.0.0.1:{socks_port}",
+                "https": f"socks5://127.0.0.1:{socks_port}",
             }
             mbps, ms, status = measure_traffic_mbps_and_ms(proxies)
             if ms is None:
                 return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic"
-            if ms > MAX_LATENCY_MS:
+            if ms > MAX_PING_MS:
                 return False, uri, meta, 0.0, ms, ("🌍", "Европа"), "high_ms"
             if mbps < MIN_SPEED_MBPS:
                 return False, uri, meta, 0.0, ms, ("🌍", "Европа"), status
@@ -787,7 +799,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                     candidates.append((sline, f"{line_meta} {frag}".strip()))
 
     if sub_tasks:
-        with ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=SOURCE_WORKERS) as pool:
             futs = [pool.submit(_fetch_single_sub, u, m) for u, m in sub_tasks]
             for fut in as_completed(futs):
                 for sline, combined_meta in fut.result():
@@ -796,7 +808,7 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
                         seen_hp.add(hp)
                         candidates.append((sline, combined_meta))
 
-    log(f"Collected {len(candidates)} unique host:port candidates from {len(sub_tasks)} sub URLs.")
+    log(f"Collected {len(candidates)} unique candidates from {len(sub_tasks)} sub URLs.")
     return candidates
 
 
@@ -834,6 +846,7 @@ def update_readme(count: int) -> None:
 
 
 def main() -> None:
+    check_socks_support()
     start_ts = time.time()
     all_candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
 
@@ -846,7 +859,7 @@ def main() -> None:
                 tcp_alive.append(res)
 
     tcp_alive.sort(key=lambda x: x[2])
-    log(f"Phase 1 TCP alive (<= {MAX_TCP_PING_MS}ms): {len(tcp_alive)} / {len(all_candidates)}")
+    log(f"TCP alive (<= {MAX_PING_MS}ms): {len(tcp_alive)} / {len(all_candidates)}")
 
     working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
@@ -855,8 +868,8 @@ def main() -> None:
     try:
         futures = [pool.submit(evaluate_xray_traffic, item) for item in tcp_alive]
         for idx, fut in enumerate(as_completed(futures), start=1):
-            if time.time() - start_ts > MAX_CHECK_PHASE_SECONDS:
-                log("Reached MAX_CHECK_PHASE_SECONDS, saving collected results...")
+            if time.time() - start_ts > MAX_PHASE_SECONDS:
+                log("Time limit reached, finishing with collected servers...")
                 for pending in futures:
                     pending.cancel()
                 break
