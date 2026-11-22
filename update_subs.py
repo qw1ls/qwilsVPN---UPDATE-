@@ -353,6 +353,10 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
 def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     network = (query.get("type", ["tcp"])[0] or "tcp").lower()
     security = (query.get("security", ["none"])[0] or "none").lower()
+    pbk = unquote(query.get("pbk", [""])[0])
+    if security == "none" and pbk:
+        security = "reality"
+
     sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0] or fallback_host)
     fp = unquote(query.get("fp", [""])[0] or "chrome")
     path_hdr = unquote(query.get("path", ["/"])[0] or "/")
@@ -360,7 +364,6 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
     stream: dict = {"network": network}
 
     if security == "reality":
-        pbk = unquote(query.get("pbk", [""])[0])
         if not pbk:
             return {}
         stream["security"] = "reality"
@@ -542,7 +545,6 @@ def _spawn_xray(outbound: dict, socks_port: int):
     config = {
         "inbounds": [
             {
-                "listen": "127.0.0.1",
                 "port": socks_port,
                 "protocol": "socks",
                 "settings": {"udp": False},
@@ -798,7 +800,7 @@ def format_server_name(
 ) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
-    speed_part = f"{mbps:.1f}Mbps" if mbps > 0 else "OK"
+    speed_part = f"{mbps:.1f}Mbps" if mbps > 0 else "LIVE"
     metrics = f"[{speed_part} | {int(round(ms))}ms]"
     if is_whitelist_entry(combined):
         ops = detect_operators(combined)
