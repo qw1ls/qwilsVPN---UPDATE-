@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies and Xray-core
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install "requests[socks]"
           curl -sL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o /tmp/xray.zip
           unzip -q /tmp/xray.zip -d /usr/local/bin/xray_bin
           chmod +x /usr/local/bin/xray_bin/xray
