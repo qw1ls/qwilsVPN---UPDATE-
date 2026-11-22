@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
@@ -22,27 +23,28 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = os.path.join(BASE_DIR, "sub.txt")
 README_FILE = os.path.join(BASE_DIR, "README.md")
 
-LATENCY_URLS = [
+TEST_URLS = [
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
+    "https://www.google.com/generate_204",
 ]
 
 SPEEDTEST_URLS = [
-    "https://speed.cloudflare.com/__down?bytes=5242880",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
+    "https://speed.cloudflare.com/__down?bytes=2097152",
 ]
 
-SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
+URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
 
-MAX_TCP_PING_MS = 3000
+MAX_TCP_PING_MS = 2500
 MAX_LATENCY_MS = 2500
-TCP_PING_TIMEOUT = 2.0
+TCP_PING_TIMEOUT = 2.2
 HTTP_TIMEOUT = 6.0
-SPEEDTEST_MAX_SECONDS = 3.5
-MAX_CANDIDATES = 1500
+SPEEDTEST_MAX_SECONDS = 3.0
+MAX_CANDIDATES = 800
 SOURCE_FETCH_WORKERS = 12
 CHECK_WORKERS = 12
-MAX_RUNTIME_SECONDS = 300
+MAX_CHECK_PHASE_SECONDS = 210
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -133,10 +135,30 @@ WHITELIST_KEYWORDS = (
 )
 
 _country_cache: dict[str, tuple[str, str]] = {}
+_dns_cache: dict[str, str | None] = {}
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def resolve_host(host: str) -> str | None:
+    if not host:
+        return None
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    if host in _dns_cache:
+        return _dns_cache[host]
+    try:
+        ip = socket.gethostbyname(host)
+        _dns_cache[host] = ip
+        return ip
+    except socket.gaierror:
+        _dns_cache[host] = None
+        return None
 
 
 def country_code_to_flag(cc: str) -> str:
@@ -166,7 +188,7 @@ def get_free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 3.0) -> bool:
+def wait_for_port(port: int, timeout: float = 2.5) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -175,15 +197,17 @@ def wait_for_port(port: int, timeout: float = 3.0) -> bool:
                 s.connect(("127.0.0.1", port))
                 return True
         except OSError:
-            time.sleep(0.06)
+            time.sleep(0.08)
     return False
 
 
 def tcp_ping(host: str, port: int, timeout: float = TCP_PING_TIMEOUT) -> float | None:
+    target = resolve_host(host) or host
     try:
         start = time.perf_counter()
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
+            sock.connect((target, port))
             return (time.perf_counter() - start) * 1000.0
     except OSError:
         return None
@@ -198,16 +222,55 @@ def _b64_decode_str(s: str) -> str:
     return base64.b64decode(cleaned, validate=False).decode("utf-8", errors="ignore")
 
 
-def maybe_b64_decode(text: str) -> str:
-    if not text or "://" in text:
-        return text
+def extract_uris_from_blob(text: str) -> list[str]:
+    """Вытаскивает все vless/vmess/trojan/ss ссылки из plain-текста, Base64 и JSON."""
+    if not text:
+        return []
+    found: list[str] = []
+    found.extend(URI_REGEX.findall(text))
+
+    # Пробуем целиком как Base64
     try:
         decoded = _b64_decode_str(text)
         if "://" in decoded:
-            return decoded
+            found.extend(URI_REGEX.findall(decoded))
     except Exception:
         pass
-    return text
+
+    # Пробуем как JSON (включая вложенные base64-поля)
+    try:
+        data = json.loads(text)
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    walk(v)
+            elif isinstance(obj, str):
+                if "://" in obj:
+                    found.extend(URI_REGEX.findall(obj))
+                elif len(obj) > 24:
+                    try:
+                        dec = _b64_decode_str(obj)
+                        if "://" in dec:
+                            found.extend(URI_REGEX.findall(dec))
+                    except Exception:
+                        pass
+
+        walk(data)
+    except Exception:
+        pass
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in found:
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
 
 
 def detect_operators(raw_meta: str) -> str:
@@ -251,17 +314,16 @@ def _parse_ss_parts(base: str) -> tuple[str, str, str, int] | None:
             method, password = unquote(userinfo).split(":", 1)
             return method, password, host, port
         return None
-    else:
-        try:
-            decoded = _b64_decode_str(body)
-            if "@" not in decoded:
-                return None
-            creds, hostport = decoded.rsplit("@", 1)
-            method, password = creds.split(":", 1)
-            host, port_s = hostport.rsplit(":", 1)
-            return method, password, host, int(port_s)
-        except Exception:
+    try:
+        decoded = _b64_decode_str(body)
+        if "@" not in decoded:
             return None
+        creds, hostport = decoded.rsplit("@", 1)
+        method, password = creds.split(":", 1)
+        host, port_s = hostport.rsplit(":", 1)
+        return method, password, host, int(port_s)
+    except Exception:
+        return None
 
 
 def extract_host_port(uri: str) -> tuple[str, int] | None:
@@ -306,12 +368,11 @@ def _build_stream_settings(query: dict, fallback_host: str) -> dict:
             return {}
         stream["security"] = "reality"
         stream["realitySettings"] = {
-            "show": False,
             "fingerprint": fp,
             "serverName": sni,
             "publicKey": pbk,
             "shortId": unquote(query.get("sid", [""])[0]),
-            "spiderX": unquote(query.get("spx", ["/"])[0] or "/"),
+            "spiderX": unquote(query.get("spx", [""])[0]),
         }
     elif security == "tls":
         tls_cfg: dict = {
@@ -373,6 +434,7 @@ def uri_to_outbound(uri: str) -> dict | None:
             if flow := query.get("flow", [""])[0]:
                 user["flow"] = flow
             return {
+                "tag": "proxy",
                 "protocol": "vless",
                 "settings": {
                     "vnext": [
@@ -400,7 +462,6 @@ def uri_to_outbound(uri: str) -> dict | None:
                 stream["security"] = "tls"
                 stream["tlsSettings"] = {
                     "serverName": sni_val,
-                    "fingerprint": "chrome",
                     "allowInsecure": True,
                 }
             if net == "ws":
@@ -411,6 +472,7 @@ def uri_to_outbound(uri: str) -> dict | None:
             elif net == "grpc":
                 stream["grpcSettings"] = {"serviceName": data.get("path", "")}
             return {
+                "tag": "proxy",
                 "protocol": "vmess",
                 "settings": {
                     "vnext": [
@@ -441,6 +503,7 @@ def uri_to_outbound(uri: str) -> dict | None:
             if not stream:
                 return None
             return {
+                "tag": "proxy",
                 "protocol": "trojan",
                 "settings": {
                     "servers": [
@@ -460,6 +523,7 @@ def uri_to_outbound(uri: str) -> dict | None:
                 return None
             method, password, host, port = parsed
             return {
+                "tag": "proxy",
                 "protocol": "shadowsocks",
                 "settings": {
                     "servers": [
@@ -479,23 +543,22 @@ def uri_to_outbound(uri: str) -> dict | None:
 
 def _spawn_xray(outbound: dict, socks_port: int):
     config = {
-        "log": {"loglevel": "none"},
         "inbounds": [
             {
-                "listen": "127.0.0.1",
                 "port": socks_port,
                 "protocol": "socks",
                 "settings": {"udp": False},
             }
         ],
         "outbounds": [outbound],
+        "log": {"loglevel": "warning"},
     }
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(config, f)
             cfg_path = f.name
         proc = subprocess.Popen(
-            ["xray", "run", "-c", cfg_path],
+            ["xray", "-config", cfg_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             preexec_fn=os.setsid,
@@ -522,79 +585,53 @@ def _stop_xray(proc, cfg_path):
             pass
 
 
-def resolve_country(host: str, proxies: dict | None = None) -> tuple[str, str]:
-    if host in _country_cache:
-        return _country_cache[host]
+def resolve_country(host: str) -> tuple[str, str]:
+    ip = resolve_host(host) or host
+    if not ip:
+        return ("🌍", "Европа")
+    if ip in _country_cache:
+        return _country_cache[ip]
 
-    if proxies:
-        for url, cc_key, name_key in (
-            ("https://api.country.is/", "country", ""),
-            ("https://ipwho.is/", "country_code", "country"),
-        ):
-            try:
-                r = requests.get(url, proxies=proxies, timeout=2.5)
-                if r.ok:
-                    data = r.json()
-                    cc = data.get(cc_key, "")
-                    if cc:
-                        res = format_country_from_code(
-                            cc,
-                            data.get(name_key, "") if name_key else "",
-                        )
-                        _country_cache[host] = res
-                        return res
-            except Exception:
-                continue
+    providers = [
+        (
+            f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
+            lambda d: (d.get("countryCode", ""), d.get("country", ""))
+            if d.get("status") == "success"
+            else ("", ""),
+        ),
+        (
+            f"https://ipwho.is/{ip}",
+            lambda d: (d.get("country_code", ""), d.get("country", "")),
+        ),
+        (
+            f"https://api.country.is/{ip}",
+            lambda d: (d.get("country", ""), ""),
+        ),
+    ]
+    for url, extractor in providers:
+        try:
+            r = requests.get(url, timeout=2.5)
+            if r.ok:
+                cc, cname = extractor(r.json())
+                if cc:
+                    res = format_country_from_code(cc, cname)
+                    _country_cache[ip] = res
+                    return res
+        except Exception:
+            continue
 
-    try:
-        ip = socket.gethostbyname(host)
-        if ip in _country_cache:
-            _country_cache[host] = _country_cache[ip]
-            return _country_cache[host]
-
-        providers = [
-            (
-                f"https://api.country.is/{ip}",
-                lambda d: (d.get("country", ""), ""),
-            ),
-            (
-                f"https://ipwho.is/{ip}",
-                lambda d: (d.get("country_code", ""), d.get("country", "")),
-            ),
-            (
-                f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
-                lambda d: (d.get("countryCode", ""), d.get("country", ""))
-                if d.get("status") == "success"
-                else ("", ""),
-            ),
-        ]
-        for url, extractor in providers:
-            try:
-                r = requests.get(url, timeout=2.5)
-                if r.ok:
-                    cc, cname = extractor(r.json())
-                    if cc:
-                        res = format_country_from_code(cc, cname)
-                        _country_cache[host] = res
-                        _country_cache[ip] = res
-                        return res
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    return ("🌍", "Европа")
+    res = ("🌍", "Европа")
+    _country_cache[ip] = res
+    return res
 
 
-def measure_traffic_mbps_and_ms(
-    proxies: dict, headers: dict
-) -> tuple[float, float | None]:
-    """Проверяет живой трафик через прокси: возвращает (mbps, best_ms)."""
+def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None]:
+    """Проверяет проход трафика через xray: сначала generate_204 (ms), затем замер Mbps."""
     latencies: list[float] = []
     for url in LATENCY_URLS:
         try:
             t0 = time.perf_counter()
-            r = requests.get(url, proxies=proxies, headers=headers, timeout=(3.0, HTTP_TIMEOUT))
+            r = requests.get(url, proxies=proxies, timeout=HTTP_TIMEOUT)
             ms = (time.perf_counter() - t0) * 1000.0
             if r.status_code in (200, 204):
                 latencies.append(ms)
@@ -614,21 +651,15 @@ def measure_traffic_mbps_and_ms(
         try:
             downloaded = 0
             start = time.perf_counter()
-            with requests.get(
-                url,
-                proxies=proxies,
-                headers=headers,
-                timeout=(3.0, HTTP_TIMEOUT),
-                stream=True,
-            ) as r:
+            with requests.get(url, proxies=proxies, timeout=5.0, stream=True) as r:
                 if r.status_code != 200:
                     continue
-                for chunk in r.iter_content(chunk_size=16384):
+                for chunk in r.iter_content(chunk_size=8192):
                     if not chunk:
                         continue
                     downloaded += len(chunk)
                     elapsed = time.perf_counter() - start
-                    if elapsed >= 0.2 and downloaded > 0:
+                    if elapsed > 0.15 and downloaded > 0:
                         speeds.append((downloaded * 8.0 / (1024 * 1024)) / elapsed)
                     if elapsed >= SPEEDTEST_MAX_SECONDS:
                         break
@@ -637,55 +668,57 @@ def measure_traffic_mbps_and_ms(
         except requests.RequestException:
             continue
 
-    # Пропуск трафика по generate_204 есть, но спидтест не успел — оставляем как живой узел
     return 0.0, best_ms
 
 
-def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str, str], str]:
+def prefilter_tcp(item: tuple[str, str]) -> tuple[str, str, float] | None:
+    uri, meta = item
     hp = extract_host_port(uri)
     if not hp:
-        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
+        return None
     host, port = hp
     if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
-        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_host"
-
+        return None
     ping = tcp_ping(host, port, timeout=TCP_PING_TIMEOUT)
     if ping is None or ping > MAX_TCP_PING_MS:
-        return False, 0.0, 9999.0, ("🌍", "Европа"), "tcp_fail"
+        return None
+    return uri, meta, ping
+
+
+def evaluate_xray_traffic(
+    item: tuple[str, str, float],
+) -> tuple[bool, str, str, float, float, tuple[str, str], str]:
+    uri, meta, _ = item
+    hp = extract_host_port(uri)
+    if not hp:
+        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
+    host, _ = hp
 
     outbound = uri_to_outbound(uri)
     if not outbound:
-        return False, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
+        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
 
     socks_port = get_free_port()
     proc, cfg_path = _spawn_xray(outbound, socks_port)
     if not proc:
-        return False, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
+        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
 
     try:
         if not wait_for_port(socks_port):
-            return False, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
+            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
 
         proxies = {
-            "http": f"socks5h://127.0.0.1:{socks_port}",
-            "https": f"socks5h://127.0.0.1:{socks_port}",
+            "http": f"socks5://127.0.0.1:{socks_port}",
+            "https": f"socks5://127.0.0.1:{socks_port}",
         }
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            )
-        }
-
-        mbps, ms = measure_traffic_mbps_and_ms(proxies, headers)
+        mbps, ms = measure_traffic_mbps_and_ms(proxies)
         if ms is None:
-            return False, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic_ping"
+            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic_ping"
         if ms > MAX_LATENCY_MS:
-            return False, 0.0, ms, ("🌍", "Европа"), "high_ms"
+            return False, uri, meta, 0.0, ms, ("🌍", "Европа"), "high_ms"
 
-        country_info = resolve_country(host, proxies=proxies)
-        return True, mbps, ms, country_info, "ok"
+        country_info = resolve_country(host)
+        return True, uri, meta, mbps, ms, country_info, "ok"
     finally:
         _stop_xray(proc, cfg_path)
 
@@ -693,15 +726,12 @@ def evaluate_config(uri: str, meta: str) -> tuple[bool, float, float, tuple[str,
 def _fetch_single_sub(url: str, line_meta: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     try:
-        sub_r = requests.get(url, timeout=6)
-        if sub_r.ok:
-            sub_txt = maybe_b64_decode(sub_r.text)
-            for sline in sub_txt.splitlines():
-                sline = sline.strip()
-                if sline.startswith(SUPPORTED_SCHEMES):
-                    frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
-                    combined_meta = f"{line_meta} {frag}".strip()
-                    found.append((sline, combined_meta))
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            for sline in extract_uris_from_blob(r.text):
+                frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
+                combined_meta = f"{line_meta} {frag}".strip()
+                found.append((sline, combined_meta))
     except Exception:
         pass
     return found
@@ -711,11 +741,17 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
     log(f"Fetching sources from {SOURCES_URL}...")
     resp = requests.get(SOURCES_URL, timeout=12)
     resp.raise_for_status()
-    raw_text = maybe_b64_decode(resp.text)
+
+    raw_text = resp.text
+    if "://" not in raw_text:
+        try:
+            raw_text = _b64_decode_str(raw_text)
+        except Exception:
+            pass
 
     candidates: list[tuple[str, str]] = []
     sub_tasks: list[tuple[str, str]] = []
-    seen_base: set[str] = set()
+    seen_hp: set[tuple[str, int]] = set()
     current_group_meta = ""
 
     for line in raw_text.splitlines():
@@ -735,25 +771,25 @@ def collect_candidates_from_sources() -> list[tuple[str, str]]:
 
         if uri_part.startswith(("http://", "https://")):
             sub_tasks.append((uri_part, line_meta))
-        elif uri_part.startswith(SUPPORTED_SCHEMES):
-            frag = unquote(uri_part.split("#", 1)[1]) if "#" in uri_part else ""
-            combined_meta = f"{line_meta} {frag}".strip()
-            base_uri = clean_uri(uri_part)
-            if base_uri not in seen_base:
-                seen_base.add(base_uri)
-                candidates.append((uri_part, combined_meta))
+        else:
+            for sline in extract_uris_from_blob(uri_part):
+                hp = extract_host_port(sline)
+                if hp and hp not in seen_hp:
+                    seen_hp.add(hp)
+                    frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
+                    candidates.append((sline, f"{line_meta} {frag}".strip()))
 
     if sub_tasks:
         with ThreadPoolExecutor(max_workers=SOURCE_FETCH_WORKERS) as pool:
             futs = [pool.submit(_fetch_single_sub, u, m) for u, m in sub_tasks]
             for fut in as_completed(futs):
                 for sline, combined_meta in fut.result():
-                    base_uri = clean_uri(sline)
-                    if base_uri not in seen_base:
-                        seen_base.add(base_uri)
+                    hp = extract_host_port(sline)
+                    if hp and hp not in seen_hp:
+                        seen_hp.add(hp)
                         candidates.append((sline, combined_meta))
 
-    log(f"Collected {len(candidates)} unique candidates (from {len(sub_tasks)} sub URLs).")
+    log(f"Collected {len(candidates)} unique host:port candidates from {len(sub_tasks)} sub URLs.")
     return candidates
 
 
@@ -762,7 +798,7 @@ def format_server_name(
 ) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
-    speed_part = f"{mbps:.1f}Mbps" if mbps > 0 else "live"
+    speed_part = f"{mbps:.1f}Mbps" if mbps > 0 else "OK"
     metrics = f"[{speed_part} | {int(round(ms))}ms]"
     if is_whitelist_entry(combined):
         ops = detect_operators(combined)
@@ -771,6 +807,18 @@ def format_server_name(
     flag = flag or "🌍"
     country_name = country_name or "Европа"
     return f"{flag} {country_name} {metrics} {BRAND_TAG}"
+
+
+def load_existing_links() -> list[str]:
+    if not os.path.exists(SUB_FILE):
+        return []
+    links: list[str] = []
+    with open(SUB_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "://" in line:
+                links.append(line)
+    return links
 
 
 def update_readme(count: int) -> None:
@@ -793,58 +841,70 @@ def update_readme(count: int) -> None:
 
 def main() -> None:
     start_ts = time.time()
-    log(f"Writing to {SUB_FILE} | max_ms={MAX_LATENCY_MS}, max_candidates={MAX_CANDIDATES}")
-    candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
+    all_candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
+
+    # Фаза 1: быстрый TCP-пинг в 30 потоков (как в vlessforu)
+    tcp_alive: list[tuple[str, str, float]] = []
+    with ThreadPoolExecutor(max_workers=30) as pool:
+        futs = [pool.submit(prefilter_tcp, item) for item in all_candidates]
+        for fut in as_completed(futs):
+            res = fut.result()
+            if res is not None:
+                tcp_alive.append(res)
+
+    tcp_alive.sort(key=lambda x: x[2])
+    log(f"Phase 1 TCP alive: {len(tcp_alive)} / {len(all_candidates)}")
+
+    # Фаза 2: реальная проверка трафика (ms + Mbps) через xray
     working: list[tuple[str, str, float, float]] = []
     reasons: dict[str, int] = {}
 
-    def worker(item: tuple[str, str]):
-        uri, meta = item
-        ok, mbps, ms, country_info, reason = evaluate_config(uri, meta)
-        return uri, meta, ok, mbps, ms, country_info, reason
-
-    with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:
-        futures = [pool.submit(worker, c) for c in candidates]
+    pool = ThreadPoolExecutor(max_workers=CHECK_WORKERS)
+    try:
+        futures = [pool.submit(evaluate_xray_traffic, item) for item in tcp_alive]
         for idx, fut in enumerate(as_completed(futures), start=1):
-            if time.time() - start_ts > MAX_RUNTIME_SECONDS:
-                log("Reached MAX_RUNTIME_SECONDS limit, stopping.")
+            if time.time() - start_ts > MAX_CHECK_PHASE_SECONDS:
+                log("Reached MAX_CHECK_PHASE_SECONDS, saving collected results...")
+                for pending in futures:
+                    pending.cancel()
                 break
-            uri, meta, ok, mbps, ms, country_info, reason = fut.result()
+            ok, uri, meta, mbps, ms, country_info, reason = fut.result()
             reasons[reason] = reasons.get(reason, 0) + 1
             hp = extract_host_port(uri)
             target_str = f"{hp[0]}:{hp[1]}" if hp else uri[:40]
             if ok:
                 title = format_server_name(uri, meta, country_info, mbps, ms)
                 working.append((clean_uri(uri), title, mbps, ms))
-                log(f"[{idx}/{len(candidates)}] OK {mbps:.1f}Mbps / {ms:.0f}ms {target_str} -> {title}")
+                log(f"[{idx}/{len(tcp_alive)}] OK {mbps:.1f}Mbps / {ms:.0f}ms {target_str} -> {title}")
             else:
-                log(f"[{idx}/{len(candidates)}] FAIL ({reason}) {target_str}")
+                log(f"[{idx}/{len(tcp_alive)}] FAIL ({reason}) {target_str}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     log(f"Stats: {reasons}")
 
-    if not working:
-        log("0 servers passed traffic check; keeping existing sub.txt so subscription is not wiped.")
-        return
-
-    # Сначала узлы с измеренной скоростью по убыванию, затем по наименьшей задержке (ms)
-    working.sort(key=lambda x: (-x[2], x[3]))
-
+    now_str = datetime.utcnow().strftime("%d.%m.%Y %H:%M UTC")
     header_lines = [
         f"#profile-title: {BRAND_TAG}",
         "#profile-update-interval: 2",
+        f"#announce: Обновлено: {now_str} | Серверов: {len(working)}",
     ]
-    final_links: list[str] = []
-    for idx, (base_uri, title, mbps, ms) in enumerate(working):
-        final_title = f"{title} ⚡" if idx == 0 else title
-        if idx == 0:
-            log(f"Top server: {final_title} ({mbps:.1f} Mbps, {ms:.0f} ms)")
-        final_links.append(f"{base_uri}#{quote(final_title)}")
+
+    if working:
+        working.sort(key=lambda x: (-x[2], x[3]))
+        final_links: list[str] = []
+        for idx, (base_uri, title, mbps, ms) in enumerate(working):
+            final_title = f"{title} ⚡" if idx == 0 else title
+            final_links.append(f"{base_uri}#{quote(final_title)}")
+    else:
+        final_links = load_existing_links()
+        log(f"0 new servers passed; kept {len(final_links)} previous links and updated timestamp.")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(header_lines + final_links) + "\n")
 
     update_readme(len(final_links))
-    log(f"Saved {len(final_links)} servers to {SUB_FILE}.")
+    log(f"Done. Written {len(final_links)} servers to {SUB_FILE}.")
 
 
 if __name__ == "__main__":
