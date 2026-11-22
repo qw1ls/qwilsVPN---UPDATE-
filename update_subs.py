@@ -30,7 +30,7 @@ LATENCY_URLS = [
 ]
 
 SPEEDTEST_URLS = [
-    "https://speed.cloudflare.com/__down?bytes=2097152",
+    "https://speed.cloudflare.com/__down?bytes=1048576",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
 
@@ -38,13 +38,13 @@ URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECAS
 
 MAX_TCP_PING_MS = 1200
 MAX_LATENCY_MS = 1200
-MIN_SPEED_MBPS = 0.05
-TCP_PING_TIMEOUT = 1.8
-HTTP_TIMEOUT = 5.0
-SPEEDTEST_MAX_SECONDS = 3.0
+MIN_SPEED_MBPS = 0.01
+TCP_PING_TIMEOUT = 2.0
+HTTP_TIMEOUT = 6.0
+SPEEDTEST_MAX_SECONDS = 3.5
 MAX_CANDIDATES = 800
 SOURCE_FETCH_WORKERS = 10
-CHECK_WORKERS = 8
+CHECK_WORKERS = 6
 MAX_CHECK_PHASE_SECONDS = 220
 
 COUNTRY_MAP = {
@@ -628,7 +628,7 @@ def resolve_country(host: str) -> tuple[str, str]:
 
 
 def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None, str]:
-    """Проверяет живой трафик: возвращает (mbps, best_ms, fail_reason)."""
+    """Проверяет живой трафик через xray: возвращает (mbps, best_ms, reason)."""
     latencies: list[float] = []
     for url in LATENCY_URLS:
         try:
@@ -711,8 +711,8 @@ def evaluate_xray_traffic(
                 return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
 
             proxies = {
-                "http": f"socks5://127.0.0.1:{socks_port}",
-                "https": f"socks5://127.0.0.1:{socks_port}",
+                "http": f"socks5h://127.0.0.1:{socks_port}",
+                "https": f"socks5h://127.0.0.1:{socks_port}",
             }
             mbps, ms, status = measure_traffic_mbps_and_ms(proxies)
             if ms is None:
@@ -889,10 +889,10 @@ def main() -> None:
         final_links.append(f"{base_uri}#{quote(final_title)}")
 
     with open(SUB_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(header_lines + final_links) + ("\n" if final_links else "\n"))
+        f.write("\n".join(header_lines + final_links) + "\n")
 
     update_readme(len(final_links))
-    log(f"Done. Written {len(final_links)} servers with traffic & <= {MAX_LATENCY_MS}ms to {SUB_FILE}.")
+    log(f"Done. Written {len(final_links)} servers to {SUB_FILE}.")
 
 
 if __name__ == "__main__":
