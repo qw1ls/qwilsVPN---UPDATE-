@@ -2,8 +2,7 @@ import base64
 import json
 import os
 import re
-import signal
-import socket
+import shutil
 import statistics
 import subprocess
 import sys
@@ -11,41 +10,41 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
+from queue import Queue
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = Path(__file__).resolve().parent
 SOURCES_URL = (
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/"
     "refs/heads/main/sources.txt"
 )
 BRAND_TAG = "@qw1lsVPN"
-SUB_FILE = os.path.join(BASE_DIR, "sub.txt")
-README_FILE = os.path.join(BASE_DIR, "README.md")
+SUB_FILE = BASE_DIR / "sub.txt"
+README_FILE = BASE_DIR / "README.md"
 
-# Лимит задержки (мс) — по запросу до 1200 мс
-MAX_PING_MS = 1200
-MIN_SPEED_MBPS = 0.01
-
-TCP_TIMEOUT = 2.0
-HTTP_TIMEOUT = 5.0
-SPEEDTEST_MAX_SECONDS = 3.0
-MAX_CANDIDATES = 800
-SOURCE_WORKERS = 10
-CHECK_WORKERS = 8
-MAX_PHASE_SECONDS = 220
-
-LATENCY_URLS = [
+TEST_URLS = [
+    "https://www.google.com/generate_204",
     "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
-    "https://www.google.com/generate_204",
 ]
 
 SPEEDTEST_URLS = [
     "https://speed.cloudflare.com/__down?bytes=1048576",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
+
+SOCKS_PORT_MIN = 20000
+PORT_POOL_SIZE = 64
+CONCURRENT_CHECKS = 5
+TEST_TIMEOUT = 7
+MAX_PING_MS = 2000
+MIN_SPEED_MBPS = 0.01
+SPEEDTEST_MAX_SECONDS = 2.5
+MAX_CANDIDATES = 600
+MAX_RUNTIME_SECONDS = 240
 
 URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
 
@@ -138,290 +137,173 @@ WHITELIST_KEYWORDS = (
 )
 
 _country_cache: dict[str, tuple[str, str]] = {}
-_dns_cache: dict[str, str | None] = {}
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def check_socks_support() -> None:
-    try:
-        import socks  # noqa: F401
-    except ImportError:
-        log("WARNING: PySocks not installed. Install with: pip install requests[socks]")
+def find_xray() -> str | None:
+    name = "xray.exe" if sys.platform == "win32" else "xray"
+    found = shutil.which(name)
+    if found:
+        return found
+    for base in [BASE_DIR, Path("."), Path.home() / "xray", Path("/usr/local/bin")]:
+        exe = base / name
+        if exe.exists():
+            return str(exe)
+    return None
 
 
-def resolve_host(host: str) -> str | None:
-    if not host:
-        return None
-    try:
-        socket.inet_aton(host)
-        return host
-    except OSError:
-        pass
-    if host in _dns_cache:
-        return _dns_cache[host]
-    try:
-        ip = socket.gethostbyname(host)
-        _dns_cache[host] = ip
-        return ip
-    except socket.gaierror:
-        _dns_cache[host] = None
-        return None
+def _make_port_pool() -> Queue[int]:
+    q: Queue[int] = Queue()
+    for i in range(PORT_POOL_SIZE):
+        q.put(SOCKS_PORT_MIN + i)
+    return q
 
 
-def country_code_to_flag(cc: str) -> str:
-    if not cc or len(cc) != 2 or not cc.isalpha():
-        return "🌍"
-    cc = cc.upper()
-    return chr(ord(cc[0]) + 0x1F1A5) + chr(ord(cc[1]) + 0x1F1A5)
-
-
-def format_country_from_code(cc: str, raw_name: str = "") -> tuple[str, str]:
-    cc = (cc or "").upper().strip()
-    if cc == "UK":
-        cc = "GB"
-    if cc in COUNTRY_MAP:
-        return COUNTRY_MAP[cc]
-    clean_name = (raw_name or "").strip()
-    if clean_name in COUNTRY_RU_TRANSLATION:
-        clean_name = COUNTRY_RU_TRANSLATION[clean_name]
-    if len(cc) == 2 and cc.isalpha():
-        return country_code_to_flag(cc), clean_name or cc
-    return "🌍", clean_name or "Европа"
-
-
-def get_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def wait_for_port(port: int, timeout: float = 4.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.3)
-                s.connect(("127.0.0.1", port))
-                return True
-        except OSError:
-            time.sleep(0.08)
-    return False
-
-
-def tcp_ping(host: str, port: int, timeout: float = TCP_TIMEOUT) -> float | None:
-    target = resolve_host(host) or host
-    try:
-        start = time.perf_counter()
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            sock.connect((target, port))
-            return (time.perf_counter() - start) * 1000.0
-    except OSError:
-        return None
-
-
-def _b64_decode_str(s: str) -> str:
-    cleaned = "".join(s.strip().split())
-    cleaned = cleaned.replace("-", "+").replace("_", "/")
+def _b64_decode(s: str) -> str:
+    cleaned = "".join(s.strip().split()).replace("-", "+").replace("_", "/")
     pad = len(cleaned) % 4
     if pad:
         cleaned += "=" * (4 - pad)
     return base64.b64decode(cleaned, validate=False).decode("utf-8", errors="ignore")
 
 
-def extract_uris_from_blob(text: str) -> list[str]:
-    if not text:
-        return []
-    found: list[str] = []
-    found.extend(URI_REGEX.findall(text))
-
-    try:
-        decoded = _b64_decode_str(text)
-        if "://" in decoded:
-            found.extend(URI_REGEX.findall(decoded))
-    except Exception:
-        pass
-
-    try:
-        data = json.loads(text)
-
-        def walk(obj):
-            if isinstance(obj, dict):
-                for v in obj.values():
-                    walk(v)
-            elif isinstance(obj, list):
-                for v in obj:
-                    walk(v)
-            elif isinstance(obj, str):
-                if "://" in obj:
-                    found.extend(URI_REGEX.findall(obj))
-                elif len(obj) > 24:
-                    try:
-                        dec = _b64_decode_str(obj)
-                        if "://" in dec:
-                            found.extend(URI_REGEX.findall(dec))
-                    except Exception:
-                        pass
-
-        walk(data)
-    except Exception:
-        pass
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for item in found:
-        item = item.strip()
-        if item and item not in seen:
-            seen.add(item)
-            unique.append(item)
-    return unique
-
-
-def detect_operators(raw_meta: str) -> str:
-    lower = raw_meta.lower()
-    if "все оператор" in lower or "all" in lower:
-        return "все операторы"
-    found = []
-    for key, label in OPERATORS_MAP.items():
-        if re.search(rf"(?<![a-zа-я0-9]){re.escape(key)}(?![a-zа-я0-9])", lower):
-            if label not in found:
-                found.append(label)
-    return ", ".join(found) if found else "все операторы"
-
-
-def is_whitelist_entry(raw_meta: str) -> bool:
-    lower = raw_meta.lower()
-    return any(kw in lower for kw in WHITELIST_KEYWORDS)
-
-
 def clean_uri(uri: str) -> str:
     return uri.split("#", 1)[0].strip()
 
 
-def _parse_ss_parts(base: str) -> tuple[str, str, str, int] | None:
-    body = base[5:]
-    if "@" in body:
-        userinfo, hostport = body.rsplit("@", 1)
-        host_part = hostport.split("/", 1)[0].split("?", 1)[0]
-        if ":" not in host_part:
-            return None
-        host, port_s = host_part.rsplit(":", 1)
-        port = int(port_s)
+def extract_uris(text: str) -> list[str]:
+    if not text:
+        return []
+    items: list[str] = list(URI_REGEX.findall(text))
+    if "://" not in text:
         try:
-            decoded_user = _b64_decode_str(userinfo)
-            if ":" in decoded_user:
-                method, password = decoded_user.split(":", 1)
-                return method, password, host, port
+            decoded = _b64_decode(text)
+            if "://" in decoded:
+                items.extend(URI_REGEX.findall(decoded))
         except Exception:
             pass
-        if ":" in unquote(userinfo):
-            method, password = unquote(userinfo).split(":", 1)
-            return method, password, host, port
-        return None
+    unique: list[str] = []
+    seen: set[str] = set()
+    for u in items:
+        u = u.strip()
+        if u and u not in seen:
+            seen.add(u)
+            unique.append(u)
+    return unique
+
+
+def _parse_ss(base: str) -> tuple[str, str, str, int] | None:
+    body = base[5:]
     try:
-        decoded = _b64_decode_str(body)
-        if "@" not in decoded:
+        if "@" in body:
+            userinfo, hostport = body.rsplit("@", 1)
+            host_part = hostport.split("/", 1)[0].split("?", 1)[0]
+            host, port_s = host_part.rsplit(":", 1)
+            port = int(port_s)
+            try:
+                dec = _b64_decode(userinfo)
+                if ":" in dec:
+                    m, p = dec.split(":", 1)
+                    return m, p, host, port
+            except Exception:
+                pass
+            raw_u = unquote(userinfo)
+            if ":" in raw_u:
+                m, p = raw_u.split(":", 1)
+                return m, p, host, port
             return None
-        creds, hostport = decoded.rsplit("@", 1)
-        method, password = creds.split(":", 1)
+        dec = _b64_decode(body)
+        if "@" not in dec:
+            return None
+        creds, hostport = dec.rsplit("@", 1)
+        m, p = creds.split(":", 1)
         host, port_s = hostport.rsplit(":", 1)
-        return method, password, host, int(port_s)
+        return m, p, host, int(port_s)
     except Exception:
         return None
 
 
 def extract_host_port(uri: str) -> tuple[str, int] | None:
     base = clean_uri(uri)
-    if len(base) > 8192:
-        return None
     try:
-        p = urlparse(base)
-        if p.scheme in ("vless", "trojan"):
-            if not p.hostname:
+        if base.startswith(("vless://", "trojan://")):
+            parsed = urlparse(base)
+            if not parsed.hostname:
                 return None
-            return p.hostname, int(p.port or 443)
-        if p.scheme == "vmess":
-            data = json.loads(_b64_decode_str(base[8:]))
-            add = data.get("add")
-            if not add:
+            return parsed.hostname.lower(), int(parsed.port or 443)
+        if base.startswith("vmess://"):
+            data = json.loads(_b64_decode(base[8:]))
+            addr = data.get("add") or data.get("address") or ""
+            if not addr:
                 return None
-            return str(add), int(data.get("port", 443))
-        if p.scheme == "ss":
-            parsed = _parse_ss_parts(base)
-            if not parsed:
+            return str(addr).lower(), int(data.get("port", 443))
+        if base.startswith("ss://"):
+            sp = _parse_ss(base)
+            if not sp:
                 return None
-            _, _, host, port = parsed
-            return host, port
+            return sp[2].lower(), sp[3]
     except Exception:
         return None
     return None
 
 
-def _build_stream_settings(query: dict, fallback_host: str) -> dict:
-    network = (query.get("type", ["tcp"])[0] or "tcp").lower()
-    security = (query.get("security", ["none"])[0] or "none").lower()
-    pbk = unquote(query.get("pbk", [""])[0])
-    if security == "none" and pbk:
-        security = "reality"
+def _stream_settings(
+    net: str = "tcp",
+    security: str = "none",
+    sni: str = "",
+    fp: str = "chrome",
+    alpn: str = "",
+    path: str = "/",
+    host: str = "",
+    pbk: str = "",
+    sid: str = "",
+    spx: str = "",
+    grpc_service: str = "",
+) -> dict:
+    ns = net.lower() if net.lower() in ("tcp", "ws", "grpc", "http", "h2") else "tcp"
+    sec = security.lower()
+    if sec == "none" and pbk:
+        sec = "reality"
 
-    sni = unquote(query.get("sni", query.get("host", [fallback_host]))[0] or fallback_host)
-    fp = unquote(query.get("fp", [""])[0] or "chrome")
-    path_hdr = unquote(query.get("path", ["/"])[0] or "/")
-
-    stream: dict = {"network": network}
-
-    if security == "reality":
-        if not pbk:
-            return {}
+    stream: dict = {"network": ns}
+    if sec == "reality" and pbk:
         stream["security"] = "reality"
         stream["realitySettings"] = {
-            "fingerprint": fp,
-            "serverName": sni,
+            "serverName": sni or host,
+            "fingerprint": fp or "chrome",
             "publicKey": pbk,
-            "shortId": unquote(query.get("sid", [""])[0]),
-            "spiderX": unquote(query.get("spx", [""])[0]),
+            "shortId": sid or "",
+            **({"spiderX": spx} if spx else {}),
         }
-    elif security == "tls":
+    elif sec == "tls":
         tls_cfg: dict = {
-            "serverName": sni,
-            "fingerprint": fp,
+            "serverName": sni or host,
+            "fingerprint": fp or "chrome",
             "allowInsecure": True,
         }
-        if alpn_raw := unquote(query.get("alpn", [""])[0]):
-            tls_cfg["alpn"] = [x.strip() for x in alpn_raw.split(",") if x.strip()]
+        if alpn:
+            tls_cfg["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
         stream["security"] = "tls"
         stream["tlsSettings"] = tls_cfg
+    else:
+        stream["security"] = "none"
 
-    host_hdr = unquote(query.get("host", [sni])[0] or sni)
-
-    if network == "ws":
+    if ns == "ws":
         stream["wsSettings"] = {
-            "path": path_hdr,
-            "headers": {"Host": host_hdr} if host_hdr else {},
+            "path": path or "/",
+            "headers": {"Host": host or sni} if (host or sni) else {},
         }
-    elif network == "grpc":
-        stream["grpcSettings"] = {
-            "serviceName": unquote(query.get("serviceName", [""])[0]),
-            "multiMode": query.get("mode", [""])[0] == "multi",
-        }
-    elif network in ("h2", "http"):
+    elif ns == "grpc":
+        stream["grpcSettings"] = {"serviceName": grpc_service or ""}
+    elif ns in ("http", "h2"):
         stream["network"] = "h2"
         stream["httpSettings"] = {
-            "path": path_hdr,
-            "host": [host_hdr] if host_hdr else [],
+            "path": path or "/",
+            "host": [host or sni] if (host or sni) else [],
         }
-    elif network in ("xhttp", "splithttp"):
-        stream["network"] = "xhttp"
-        xhttp_obj: dict = {
-            "path": path_hdr,
-            "host": host_hdr,
-        }
-        if "mode" in query:
-            xhttp_obj["mode"] = query["mode"][0]
-        stream["xhttpSettings"] = xhttp_obj
 
     return stream
 
@@ -430,119 +312,131 @@ def uri_to_outbound(uri: str) -> dict | None:
     base = clean_uri(uri)
     try:
         if base.startswith("vless://"):
-            p = urlparse(base)
-            if not p.hostname or not p.username:
+            parsed = urlparse(base)
+            if "@" not in parsed.netloc:
                 return None
-            query = parse_qs(p.query)
-            stream = _build_stream_settings(query, p.hostname)
-            if not stream:
+            uid_raw, host_port = parsed.netloc.rsplit("@", 1)
+            uid = unquote(uid_raw)
+            if ":" in host_port:
+                host, port_s = host_port.rsplit(":", 1)
+                port = int(port_s)
+            else:
+                host, port = host_port, 443
+            if not uid or not host:
                 return None
-            user: dict = {
-                "id": unquote(p.username),
-                "encryption": query.get("encryption", ["none"])[0] or "none",
-            }
-            if flow := query.get("flow", [""])[0]:
+            q = parse_qs(parsed.query)
+            get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+            flow = get("flow")
+            user: dict = {"id": uid, "encryption": get("encryption", "none") or "none"}
+            if flow:
                 user["flow"] = flow
             return {
-                "tag": "proxy",
                 "protocol": "vless",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": p.hostname,
-                            "port": int(p.port or 443),
-                            "users": [user],
-                        }
-                    ]
-                },
-                "streamSettings": stream,
+                "tag": "proxy",
+                "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+                "streamSettings": _stream_settings(
+                    net=get("type", "tcp"),
+                    security=get("security", "none"),
+                    sni=get("sni") or get("host") or host,
+                    fp=get("fp", "chrome"),
+                    alpn=get("alpn", ""),
+                    path=get("path", "/"),
+                    host=get("host") or get("sni") or host,
+                    pbk=get("pbk") or get("publicKey"),
+                    sid=get("sid") or get("shortId"),
+                    spx=get("spx") or get("spiderX"),
+                    grpc_service=get("serviceName"),
+                ),
             }
 
         if base.startswith("vmess://"):
-            data = json.loads(_b64_decode_str(base[8:]))
-            add = data.get("add")
-            uid = data.get("id")
-            if not add or not uid:
+            data = json.loads(_b64_decode(base[8:]))
+            addr = str(data.get("add") or data.get("address") or "").strip()
+            uid = str(data.get("id") or data.get("uuid") or "").strip()
+            if not addr or not uid:
                 return None
-            net = str(data.get("net", "tcp")).lower()
-            path_val = str(data.get("path", "/") or "/")
-            stream: dict = {"network": net}
-            sni_val = data.get("sni") or data.get("host", "")
-            if str(data.get("tls", "")).lower() == "tls":
-                stream["security"] = "tls"
-                stream["tlsSettings"] = {
-                    "serverName": sni_val,
-                    "allowInsecure": True,
-                }
-            if net == "ws":
-                stream["wsSettings"] = {
-                    "path": path_val,
-                    "headers": {"Host": data.get("host", "")},
-                }
-            elif net == "grpc":
-                stream["grpcSettings"] = {"serviceName": data.get("path", "")}
+            port = int(data.get("port", 443))
+            tls_flag = str(data.get("tls", "")).strip().lower() in ("1", "true", "tls", "yes")
+            sec = "tls" if tls_flag else "none"
+            sni = str(data.get("sni") or data.get("host") or addr).strip()
+            host_h = str(data.get("host") or sni).strip()
             return {
-                "tag": "proxy",
                 "protocol": "vmess",
+                "tag": "proxy",
                 "settings": {
                     "vnext": [
                         {
-                            "address": str(add),
-                            "port": int(data.get("port", 443)),
+                            "address": addr,
+                            "port": port,
                             "users": [
                                 {
-                                    "id": str(uid),
+                                    "id": uid,
                                     "alterId": int(data.get("aid", 0) or 0),
-                                    "security": "auto",
+                                    "security": str(data.get("scy") or "auto"),
                                 }
                             ],
                         }
                     ]
                 },
-                "streamSettings": stream,
+                "streamSettings": _stream_settings(
+                    net=str(data.get("net") or "tcp"),
+                    security=sec,
+                    sni=sni,
+                    fp=str(data.get("fp") or "chrome"),
+                    alpn=str(data.get("alpn") or ""),
+                    path=str(data.get("path") or "/"),
+                    host=host_h,
+                ),
             }
 
         if base.startswith("trojan://"):
-            p = urlparse(base)
-            if not p.hostname or not p.username:
+            parsed = urlparse(base)
+            if "@" not in parsed.netloc:
                 return None
-            query = parse_qs(p.query)
-            if "security" not in query:
-                query["security"] = ["tls"]
-            stream = _build_stream_settings(query, p.hostname)
-            if not stream:
+            pwd_raw, host_port = parsed.netloc.rsplit("@", 1)
+            pwd = unquote(pwd_raw)
+            if ":" in host_port:
+                host, port_s = host_port.rsplit(":", 1)
+                port = int(port_s)
+            else:
+                host, port = host_port, 443
+            if not pwd or not host:
                 return None
+            q = parse_qs(parsed.query)
+            get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+            srv: dict = {"address": host, "port": port, "password": pwd}
+            if flow := get("flow"):
+                srv["flow"] = flow
             return {
-                "tag": "proxy",
                 "protocol": "trojan",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": p.hostname,
-                            "port": int(p.port or 443),
-                            "password": unquote(p.username),
-                        }
-                    ]
-                },
-                "streamSettings": stream,
+                "tag": "proxy",
+                "settings": {"servers": [srv]},
+                "streamSettings": _stream_settings(
+                    net=get("type", "tcp"),
+                    security=get("security", "tls"),
+                    sni=get("sni") or get("host") or host,
+                    fp=get("fp", "chrome"),
+                    alpn=get("alpn", ""),
+                    path=get("path", "/"),
+                    host=get("host") or get("sni") or host,
+                    pbk=get("pbk") or get("publicKey"),
+                    sid=get("sid") or get("shortId"),
+                    spx=get("spx") or get("spiderX"),
+                    grpc_service=get("serviceName"),
+                ),
             }
 
         if base.startswith("ss://"):
-            parsed = _parse_ss_parts(base)
-            if not parsed:
+            sp = _parse_ss(base)
+            if not sp:
                 return None
-            method, password, host, port = parsed
+            method, password, host, port = sp
             return {
-                "tag": "proxy",
                 "protocol": "shadowsocks",
+                "tag": "proxy",
                 "settings": {
                     "servers": [
-                        {
-                            "address": host,
-                            "port": port,
-                            "method": method,
-                            "password": password,
-                        }
+                        {"address": host, "port": port, "method": method, "password": password}
                     ]
                 },
             }
@@ -551,8 +445,9 @@ def uri_to_outbound(uri: str) -> dict | None:
     return None
 
 
-def _spawn_xray(outbound: dict, socks_port: int):
-    config = {
+def build_xray_config(outbound: dict, socks_port: int) -> dict:
+    return {
+        "log": {"loglevel": "error"},
         "inbounds": [
             {
                 "listen": "127.0.0.1",
@@ -561,351 +456,335 @@ def _spawn_xray(outbound: dict, socks_port: int):
                 "settings": {"udp": False},
             }
         ],
-        "outbounds": [outbound],
-        "log": {"loglevel": "none"},
+        "outbounds": [
+            outbound,
+            {"protocol": "freedom", "tag": "direct"},
+        ],
     }
+
+
+def country_flag(cc: str) -> str:
+    if not cc or len(cc) != 2 or not cc.isalpha():
+        return "🌍"
+    cc = cc.upper()
+    return chr(ord(cc[0]) + 0x1F1A5) + chr(ord(cc[1]) + 0x1F1A5)
+
+
+def resolve_country(host: str) -> tuple[str, str]:
+    if host in _country_cache:
+        return _country_cache[host]
     try:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(config, f)
-            cfg_path = f.name
+        ip = host
+        try:
+            import socket
+            socket.inet_aton(host)
+        except OSError:
+            ip = socket.gethostbyname(host)
+        for url in (
+            f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
+            f"https://ipwho.is/{ip}",
+            f"https://api.country.is/{ip}",
+        ):
+            try:
+                r = requests.get(url, timeout=2.5)
+                if not r.ok:
+                    continue
+                d = r.json()
+                cc = (d.get("countryCode") or d.get("country_code") or d.get("country") or "").upper()
+                cname = (d.get("country") or "").strip()
+                if cc == "UK":
+                    cc = "GB"
+                if cc in COUNTRY_MAP:
+                    res = COUNTRY_MAP[cc]
+                    _country_cache[host] = res
+                    return res
+                if cname in COUNTRY_RU_TRANSLATION:
+                    res = (country_flag(cc), COUNTRY_RU_TRANSLATION[cname])
+                    _country_cache[host] = res
+                    return res
+                if len(cc) == 2 and cc.isalpha():
+                    res = (country_flag(cc), cname or cc)
+                    _country_cache[host] = res
+                    return res
+            except Exception:
+                continue
+    except Exception:
+        pass
+    res = ("🌍", "Европа")
+    _country_cache[host] = res
+    return res
+
+
+def detect_operators(raw_meta: str) -> str:
+    lower = raw_meta.lower()
+    if "все оператор" in lower or "all" in lower:
+        return "все операторы"
+    found: list[str] = []
+    for k, label in OPERATORS_MAP.items():
+        if re.search(rf"(?<![a-zа-я0-9]){re.escape(k)}(?![a-zа-я0-9])", lower):
+            if label not in found:
+                found.append(label)
+    return ", ".join(found) if found else "все операторы"
+
+
+def is_whitelist(raw_meta: str) -> bool:
+    lower = raw_meta.lower()
+    return any(kw in lower for kw in WHITELIST_KEYWORDS)
+
+
+def format_title(uri: str, meta: str, country: tuple[str, str], mbps: float, ms: float) -> str:
+    frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
+    combined = f"{frag} {meta}".strip()
+    metrics = f"[{mbps:.1f}Mbps | {int(round(ms))}ms]"
+    if is_whitelist(combined):
+        return f"🇪🇺 white list ({detect_operators(combined)}) {metrics} {BRAND_TAG}"
+    flag, name = country
+    return f"{flag or '🌍'} {name or 'Европа'} {metrics} {BRAND_TAG}"
+
+
+def measure_mbps(proxies: dict) -> float:
+    speeds: list[float] = []
+    for url in SPEEDTEST_URLS:
+        try:
+            downloaded = 0
+            start = time.perf_counter()
+            with requests.get(url, proxies=proxies, timeout=TEST_TIMEOUT, stream=True) as r:
+                if r.status_code != 200:
+                    continue
+                for chunk in r.iter_content(chunk_size=16384):
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    elapsed = time.perf_counter() - start
+                    if elapsed >= 0.15 and downloaded > 0:
+                        speeds.append((downloaded * 8.0 / (1024 * 1024)) / elapsed)
+                    if elapsed >= SPEEDTEST_MAX_SECONDS:
+                        break
+            if speeds:
+                return statistics.median(speeds)
+        except Exception:
+            continue
+    return 0.0
+
+
+def run_xray_and_test(
+    xray_exe: str,
+    outbound: dict,
+    socks_port: int,
+    timeout: int = TEST_TIMEOUT,
+) -> tuple[bool, float, float, str]:
+    """
+    Запускает xray с конфигом, проверяет трафик и задержку (ms) + скорость (Mbps).
+    Возвращает (ok, mbps, ping_ms, reason).
+    """
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    fd, cfg_path = tempfile.mkstemp(suffix=".json")
+    proc = None
+    try:
+        cfg_data = build_xray_config(outbound, socks_port)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg_data, f)
+        fd = -1
+
         proc = subprocess.Popen(
-            ["xray", "-config", cfg_path],
+            [xray_exe, "run", "-config", cfg_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+            creationflags=creationflags,
         )
-        return proc, cfg_path
-    except OSError:
-        return None, None
+        time.sleep(1.0)
 
+        proxy_url = f"socks5://127.0.0.1:{socks_port}"
+        proxies = {"http": proxy_url, "https": proxy_url}
 
-def _stop_xray(proc, cfg_path):
-    if proc:
-        try:
-            if hasattr(os, "killpg"):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
+        ping_ms: float | None = None
+        for test_url in TEST_URLS:
+            t0 = time.perf_counter()
+            try:
+                r = requests.get(test_url, proxies=proxies, timeout=timeout)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                if r.status_code in (200, 204):
+                    ping_ms = elapsed_ms
+                    break
+            except Exception:
+                continue
+
+        if ping_ms is None:
+            return False, 0.0, -1.0, "no_traffic"
+        if ping_ms > MAX_PING_MS:
+            return False, 0.0, ping_ms, "high_ping"
+
+        mbps = measure_mbps(proxies)
+        if mbps < MIN_SPEED_MBPS:
+            return False, 0.0, ping_ms, "low_speed"
+
+        return True, mbps, ping_ms, "ok"
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=1.5)
-        except subprocess.TimeoutExpired:
-            pass
-    if cfg_path and os.path.exists(cfg_path):
         try:
             os.unlink(cfg_path)
         except OSError:
             pass
 
 
-def resolve_country(host: str) -> tuple[str, str]:
-    ip = resolve_host(host) or host
-    if not ip:
-        return ("🌍", "Европа")
-    if ip in _country_cache:
-        return _country_cache[ip]
-
-    providers = [
-        (
-            f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
-            lambda d: (d.get("countryCode", ""), d.get("country", ""))
-            if d.get("status") == "success"
-            else ("", ""),
-        ),
-        (
-            f"https://ipwho.is/{ip}",
-            lambda d: (d.get("country_code", ""), d.get("country", "")),
-        ),
-        (
-            f"https://api.country.is/{ip}",
-            lambda d: (d.get("country", ""), ""),
-        ),
-    ]
-    for url, extractor in providers:
-        try:
-            r = requests.get(url, timeout=2.5)
-            if r.ok:
-                cc, cname = extractor(r.json())
-                if cc:
-                    res = format_country_from_code(cc, cname)
-                    _country_cache[ip] = res
-                    return res
-        except Exception:
-            continue
-
-    res = ("🌍", "Европа")
-    _country_cache[ip] = res
-    return res
-
-
-def measure_traffic_mbps_and_ms(proxies: dict) -> tuple[float, float | None, str]:
-    """Проверяет трафик через SOCKS5 прокси xray: возвращает (mbps, ms, reason)."""
-    latencies: list[float] = []
-    for url in LATENCY_URLS:
-        try:
-            t0 = time.perf_counter()
-            r = requests.get(url, proxies=proxies, timeout=HTTP_TIMEOUT)
-            ms = (time.perf_counter() - t0) * 1000.0
-            if r.status_code in (200, 204):
-                latencies.append(ms)
-                break
-        except Exception:
-            continue
-
-    if not latencies:
-        return 0.0, None, "no_traffic"
-
-    best_ms = min(latencies)
-    if best_ms > MAX_PING_MS:
-        return 0.0, best_ms, "high_ms"
-
-    speeds: list[float] = []
-    for url in SPEEDTEST_URLS:
-        try:
-            downloaded = 0
-            start = time.perf_counter()
-            with requests.get(url, proxies=proxies, timeout=HTTP_TIMEOUT, stream=True) as r:
-                if r.status_code != 200:
-                    continue
-                for chunk in r.iter_content(chunk_size=8192):
-                    if not chunk:
-                        continue
-                    downloaded += len(chunk)
-                    elapsed = time.perf_counter() - start
-                    if elapsed > 0.1 and downloaded > 0:
-                        speeds.append((downloaded * 8.0 / (1024 * 1024)) / elapsed)
-                    if elapsed >= SPEEDTEST_MAX_SECONDS:
-                        break
-            if speeds:
-                return statistics.median(speeds), best_ms, "ok"
-        except Exception:
-            continue
-
-    return 0.0, best_ms, "no_speed"
-
-
-def prefilter_tcp(item: tuple[str, str]) -> tuple[str, str, float] | None:
-    uri, meta = item
-    hp = extract_host_port(uri)
-    if not hp:
-        return None
-    host, port = hp
-    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port <= 0:
-        return None
-    ping = tcp_ping(host, port, timeout=TCP_TIMEOUT)
-    if ping is None or ping > MAX_PING_MS:
-        return None
-    return uri, meta, ping
-
-
-def evaluate_xray_traffic(
-    item: tuple[str, str, float],
-) -> tuple[bool, str, str, float, float, tuple[str, str], str]:
-    uri, meta, _ = item
-    try:
-        hp = extract_host_port(uri)
-        if not hp:
-            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_uri"
-        host, _ = hp
-
-        outbound = uri_to_outbound(uri)
-        if not outbound:
-            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "bad_outbound"
-
-        socks_port = get_free_port()
-        proc, cfg_path = _spawn_xray(outbound, socks_port)
-        if not proc:
-            return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_spawn_fail"
-
-        try:
-            if not wait_for_port(socks_port):
-                return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "xray_port_fail"
-
-            proxies = {
-                "http": f"socks5://127.0.0.1:{socks_port}",
-                "https": f"socks5://127.0.0.1:{socks_port}",
-            }
-            mbps, ms, status = measure_traffic_mbps_and_ms(proxies)
-            if ms is None:
-                return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "no_traffic"
-            if ms > MAX_PING_MS:
-                return False, uri, meta, 0.0, ms, ("🌍", "Европа"), "high_ms"
-            if mbps < MIN_SPEED_MBPS:
-                return False, uri, meta, 0.0, ms, ("🌍", "Европа"), status
-
-            country_info = resolve_country(host)
-            return True, uri, meta, mbps, ms, country_info, "ok"
-        finally:
-            _stop_xray(proc, cfg_path)
-    except Exception:
-        return False, uri, meta, 0.0, 9999.0, ("🌍", "Европа"), "worker_error"
-
-
-def _fetch_single_sub(url: str, line_meta: str) -> list[tuple[str, str]]:
-    found: list[tuple[str, str]] = []
-    try:
-        r = requests.get(url, timeout=8)
-        if r.ok:
-            for sline in extract_uris_from_blob(r.text):
-                frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
-                combined_meta = f"{line_meta} {frag}".strip()
-                found.append((sline, combined_meta))
-    except Exception:
-        pass
-    return found
-
-
-def collect_candidates_from_sources() -> list[tuple[str, str]]:
+def collect_sources() -> list[tuple[str, str]]:
     log(f"Fetching sources from {SOURCES_URL}...")
-    resp = requests.get(SOURCES_URL, timeout=12)
+    resp = requests.get(SOURCES_URL, timeout=20)
     resp.raise_for_status()
-
-    raw_text = resp.text
-    if "://" not in raw_text:
+    raw = resp.text.strip()
+    if "://" not in raw and not raw.startswith(("{", "[")):
         try:
-            raw_text = _b64_decode_str(raw_text)
+            raw = _b64_decode(raw)
         except Exception:
             pass
 
     candidates: list[tuple[str, str]] = []
-    sub_tasks: list[tuple[str, str]] = []
+    sub_urls: list[tuple[str, str]] = []
     seen_hp: set[tuple[str, int]] = set()
-    current_group_meta = ""
+    group_meta = ""
 
-    for line in raw_text.splitlines():
+    for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
         if line.startswith("#") and "://" not in line:
-            current_group_meta = line.lstrip("#").strip()
+            group_meta = line.lstrip("#").strip()
             continue
-
-        line_meta = current_group_meta
-        uri_part = line
+        meta = group_meta
+        part = line
         if " | " in line and "://" in line:
-            parts = line.split(" | ", 1)
-            uri_part = parts[0].strip()
-            line_meta = f"{current_group_meta} {parts[1].strip()}".strip()
-
-        if uri_part.startswith(("http://", "https://")):
-            sub_tasks.append((uri_part, line_meta))
+            part, extra = line.split(" | ", 1)
+            part = part.strip()
+            meta = f"{group_meta} {extra.strip()}".strip()
+        if part.startswith(("http://", "https://")):
+            sub_urls.append((part, meta))
         else:
-            for sline in extract_uris_from_blob(uri_part):
-                hp = extract_host_port(sline)
+            for u in extract_uris(part):
+                hp = extract_host_port(u)
                 if hp and hp not in seen_hp:
                     seen_hp.add(hp)
-                    frag = unquote(sline.split("#", 1)[1]) if "#" in sline else ""
-                    candidates.append((sline, f"{line_meta} {frag}".strip()))
+                    frag = unquote(u.split("#", 1)[1]) if "#" in u else ""
+                    candidates.append((u, f"{meta} {frag}".strip()))
 
-    if sub_tasks:
-        with ThreadPoolExecutor(max_workers=SOURCE_WORKERS) as pool:
-            futs = [pool.submit(_fetch_single_sub, u, m) for u, m in sub_tasks]
-            for fut in as_completed(futs):
-                for sline, combined_meta in fut.result():
-                    hp = extract_host_port(sline)
+    def fetch_sub(item: tuple[str, str]) -> list[tuple[str, str]]:
+        url, m = item
+        out: list[tuple[str, str]] = []
+        try:
+            r = requests.get(url, timeout=10, headers={"User-Agent": "v2ray-checker/1.0"})
+            if r.ok:
+                for u in extract_uris(r.text):
+                    frag = unquote(u.split("#", 1)[1]) if "#" in u else ""
+                    out.append((u, f"{m} {frag}".strip()))
+        except Exception:
+            pass
+        return out
+
+    if sub_urls:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for fut in as_completed([pool.submit(fetch_sub, s) for s in sub_urls]):
+                for u, m in fut.result():
+                    hp = extract_host_port(u)
                     if hp and hp not in seen_hp:
                         seen_hp.add(hp)
-                        candidates.append((sline, combined_meta))
+                        candidates.append((u, m))
 
-    log(f"Collected {len(candidates)} unique candidates from {len(sub_tasks)} sub URLs.")
-    return candidates
-
-
-def format_server_name(
-    uri: str, meta: str, country_info: tuple[str, str], mbps: float, ms: float
-) -> str:
-    frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
-    combined = f"{frag} {meta}".strip()
-    metrics = f"[{mbps:.1f}Mbps | {int(round(ms))}ms]"
-    if is_whitelist_entry(combined):
-        ops = detect_operators(combined)
-        return f"🇪🇺 white list ({ops}) {metrics} {BRAND_TAG}"
-    flag, country_name = country_info
-    flag = flag or "🌍"
-    country_name = country_name or "Европа"
-    return f"{flag} {country_name} {metrics} {BRAND_TAG}"
+    log(f"Collected {len(candidates)} unique servers from {len(sub_urls)} subscriptions.")
+    return candidates[:MAX_CANDIDATES]
 
 
 def update_readme(count: int) -> None:
-    if not os.path.exists(README_FILE):
+    if not README_FILE.exists():
         return
-    with open(README_FILE, "r", encoding="utf-8") as f:
-        content = f.read()
-    badge_line = f"Рабочих серверов в подписке: **{count}**"
+    content = README_FILE.read_text(encoding="utf-8")
+    line = f"Рабочих серверов в подписке: **{count}**"
     if re.search(r"Рабочих серверов в подписке:\s*\*\*\d+\*\*", content):
-        content = re.sub(
-            r"Рабочих серверов в подписке:\s*\*\*\d+\*\*",
-            badge_line,
-            content,
-        )
+        content = re.sub(r"Рабочих серверов в подписке:\s*\*\*\d+\*\*", line, content)
     else:
-        content = content.rstrip() + f"\n\n{badge_line}\n"
-    with open(README_FILE, "w", encoding="utf-8") as f:
-        f.write(content)
+        content = content.rstrip() + f"\n\n{line}\n"
+    README_FILE.write_text(content, encoding="utf-8")
 
 
 def main() -> None:
-    check_socks_support()
+    xray_exe = find_xray()
+    if not xray_exe:
+        log("[ERROR] xray binary not found.")
+        sys.exit(1)
+
     start_ts = time.time()
-    all_candidates = collect_candidates_from_sources()[:MAX_CANDIDATES]
-
-    tcp_alive: list[tuple[str, str, float]] = []
-    with ThreadPoolExecutor(max_workers=24) as pool:
-        futs = [pool.submit(prefilter_tcp, item) for item in all_candidates]
-        for fut in as_completed(futs):
-            res = fut.result()
-            if res is not None:
-                tcp_alive.append(res)
-
-    tcp_alive.sort(key=lambda x: x[2])
-    log(f"TCP alive (<= {MAX_PING_MS}ms): {len(tcp_alive)} / {len(all_candidates)}")
-
+    candidates = collect_sources()
+    port_pool = _make_port_pool()
     working: list[tuple[str, str, float, float]] = []
-    reasons: dict[str, int] = {}
+    stats: dict[str, int] = {}
 
-    pool = ThreadPoolExecutor(max_workers=CHECK_WORKERS)
+    def check_one(item: tuple[str, str]):
+        uri, meta = item
+        hp = extract_host_port(uri)
+        if not hp:
+            return False, uri, 0.0, -1.0, ("🌍", "Европа"), "bad_uri"
+        host, _ = hp
+        outbound = uri_to_outbound(uri)
+        if not outbound:
+            return False, uri, 0.0, -1.0, ("🌍", "Европа"), "bad_outbound"
+        port = port_pool.get()
+        try:
+            ok, mbps, ms, reason = run_xray_and_test(xray_exe, outbound, port, timeout=TEST_TIMEOUT)
+            country = resolve_country(host) if ok else ("🌍", "Европа")
+            return ok, uri, mbps, ms, country, reason
+        finally:
+            port_pool.put(port)
+
+    pool = ThreadPoolExecutor(max_workers=CONCURRENT_CHECKS)
     try:
-        futures = [pool.submit(evaluate_xray_traffic, item) for item in tcp_alive]
+        futures = [pool.submit(check_one, c) for c in candidates]
         for idx, fut in enumerate(as_completed(futures), start=1):
-            if time.time() - start_ts > MAX_PHASE_SECONDS:
-                log("Time limit reached, finishing with collected servers...")
-                for pending in futures:
-                    pending.cancel()
+            if time.time() - start_ts > MAX_RUNTIME_SECONDS:
+                log("Runtime limit reached, finishing...")
+                for f in futures:
+                    f.cancel()
                 break
-            ok, uri, meta, mbps, ms, country_info, reason = fut.result()
-            reasons[reason] = reasons.get(reason, 0) + 1
-            hp = extract_host_port(uri)
-            target_str = f"{hp[0]}:{hp[1]}" if hp else uri[:40]
+            uri, meta = candidates[0] if False else ("", "")
+            try:
+                ok, uri, mbps, ms, country, reason = fut.result()
+            except Exception:
+                ok, uri, mbps, ms, country, reason = False, "", 0.0, -1.0, ("🌍", "Европа"), "error"
+            stats[reason] = stats.get(reason, 0) + 1
             if ok:
-                title = format_server_name(uri, meta, country_info, mbps, ms)
+                meta_match = next((m for u, m in candidates if clean_uri(u) == clean_uri(uri)), "")
+                title = format_title(uri, meta_match, country, mbps, ms)
                 working.append((clean_uri(uri), title, mbps, ms))
-                log(f"[{idx}/{len(tcp_alive)}] OK {mbps:.1f}Mbps / {ms:.0f}ms {target_str} -> {title}")
+                log(f"[{idx}/{len(candidates)}] OK {mbps:.1f}Mbps / {ms:.0f}ms -> {title}")
             else:
-                log(f"[{idx}/{len(tcp_alive)}] FAIL ({reason}) {target_str}")
+                log(f"[{idx}/{len(candidates)}] FAIL ({reason})")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
-    log(f"Stats: {reasons}")
+    log(f"Stats: {stats}")
 
+    working.sort(key=lambda x: (-x[2], x[3]))
     now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-    header_lines = [
+    header = [
         f"#profile-title: {BRAND_TAG}",
         "#profile-update-interval: 2",
         f"#announce: Обновлено: {now_str} | Серверов: {len(working)}",
     ]
+    links: list[str] = []
+    for i, (base_uri, title, _, _) in enumerate(working):
+        final_title = f"{title} ⚡" if i == 0 else title
+        links.append(f"{base_uri}#{quote(final_title)}")
 
-    working.sort(key=lambda x: (-x[2], x[3]))
-    final_links: list[str] = []
-    for idx, (base_uri, title, mbps, ms) in enumerate(working):
-        final_title = f"{title} ⚡" if idx == 0 else title
-        final_links.append(f"{base_uri}#{quote(final_title)}")
-
-    with open(SUB_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(header_lines + final_links) + "\n")
-
-    update_readme(len(final_links))
-    log(f"Done. Written {len(final_links)} servers to {SUB_FILE}.")
+    SUB_FILE.write_text("\n".join(header + links) + "\n", encoding="utf-8")
+    update_readme(len(links))
+    log(f"Saved {len(links)} working servers to {SUB_FILE}.")
 
 
 if __name__ == "__main__":
