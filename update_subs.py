@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -25,14 +26,15 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = BASE_DIR / "sub.txt"
 README_FILE = BASE_DIR / "README.md"
 
-MAX_PING_MS = 1200
-TEST_TIMEOUT = 6
-SPEEDTEST_MAX_SECONDS = 2.5
+MAX_PING_MS = 2500
+TCP_TIMEOUT = 1.3
+TEST_TIMEOUT = 5
+SPEEDTEST_MAX_SECONDS = 2.0
 SOCKS_PORT_MIN = 20000
-PORT_POOL_SIZE = 64
-CONCURRENT_CHECKS = 6
-MAX_CANDIDATES = 800
-MAX_RUNTIME_SECONDS = 240
+PORT_POOL_SIZE = 128
+CONCURRENT_CHECKS = 10
+MAX_CANDIDATES = 2000
+MAX_RUNTIME_SECONDS = 320
 
 TEST_URLS = [
     "https://www.google.com/generate_204",
@@ -41,7 +43,7 @@ TEST_URLS = [
 ]
 
 SPEEDTEST_URLS = [
-    "https://speed.cloudflare.com/__down?bytes=1048576",
+    "https://speed.cloudflare.com/__down?bytes=524288",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
 
@@ -250,6 +252,28 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
     return None
 
 
+def tcp_reachable(host: str, port: int, timeout: float = TCP_TIMEOUT) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _is_valid_reality_pbk(pbk: str) -> bool:
+    if not pbk:
+        return False
+    try:
+        s = pbk.strip().replace("-", "+").replace("_", "/")
+        pad = len(s) % 4
+        if pad:
+            s += "=" * (4 - pad)
+        raw = base64.b64decode(s, validate=False)
+        return len(raw) == 32
+    except Exception:
+        return False
+
+
 def _stream_settings(
     net: str = "tcp",
     security: str = "none",
@@ -262,22 +286,26 @@ def _stream_settings(
     sid: str = "",
     spx: str = "",
     grpc_service: str = "",
-) -> dict:
+) -> dict | None:
     ns = net.lower() if net.lower() in ("tcp", "ws", "grpc", "http", "h2") else "tcp"
     sec = security.lower()
     if sec == "none" and pbk:
         sec = "reality"
 
     stream: dict = {"network": ns}
-    if sec == "reality" and pbk:
+    if sec == "reality":
+        if not _is_valid_reality_pbk(pbk):
+            return None
         stream["security"] = "reality"
-        stream["realitySettings"] = {
-            "serverName": sni or host,
+        real_cfg: dict = {
+            "serverName": sni or host or "www.google.com",
             "fingerprint": fp or "chrome",
-            "publicKey": pbk,
-            "shortId": sid or "",
-            **({"spiderX": spx} if spx else {}),
+            "publicKey": pbk.strip(),
+            "shortId": sid.strip(),
         }
+        if spx.strip():
+            real_cfg["spiderX"] = spx.strip()
+        stream["realitySettings"] = real_cfg
     elif sec == "tls":
         tls_cfg: dict = {
             "serverName": sni or host,
@@ -326,6 +354,21 @@ def uri_to_outbound(uri: str) -> dict | None:
                 return None
             q = parse_qs(parsed.query)
             get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+            stream = _stream_settings(
+                net=get("type", "tcp"),
+                security=get("security", "none"),
+                sni=get("sni") or get("host") or host,
+                fp=get("fp", "chrome"),
+                alpn=get("alpn", ""),
+                path=get("path", "/"),
+                host=get("host") or get("sni") or host,
+                pbk=get("pbk") or get("publicKey"),
+                sid=get("sid") or get("shortId"),
+                spx=get("spx") or get("spiderX"),
+                grpc_service=get("serviceName"),
+            )
+            if stream is None:
+                return None
             flow = get("flow")
             user: dict = {"id": uid, "encryption": get("encryption", "none") or "none"}
             if flow:
@@ -334,19 +377,7 @@ def uri_to_outbound(uri: str) -> dict | None:
                 "protocol": "vless",
                 "tag": "proxy",
                 "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
-                "streamSettings": _stream_settings(
-                    net=get("type", "tcp"),
-                    security=get("security", "none"),
-                    sni=get("sni") or get("host") or host,
-                    fp=get("fp", "chrome"),
-                    alpn=get("alpn", ""),
-                    path=get("path", "/"),
-                    host=get("host") or get("sni") or host,
-                    pbk=get("pbk") or get("publicKey"),
-                    sid=get("sid") or get("shortId"),
-                    spx=get("spx") or get("spiderX"),
-                    grpc_service=get("serviceName"),
-                ),
+                "streamSettings": stream,
             }
 
         if base.startswith("vmess://"):
@@ -360,6 +391,17 @@ def uri_to_outbound(uri: str) -> dict | None:
             sec = "tls" if tls_flag else "none"
             sni = str(data.get("sni") or data.get("host") or addr).strip()
             host_h = str(data.get("host") or sni).strip()
+            stream = _stream_settings(
+                net=str(data.get("net") or "tcp"),
+                security=sec,
+                sni=sni,
+                fp=str(data.get("fp") or "chrome"),
+                alpn=str(data.get("alpn") or ""),
+                path=str(data.get("path") or "/"),
+                host=host_h,
+            )
+            if stream is None:
+                return None
             return {
                 "protocol": "vmess",
                 "tag": "proxy",
@@ -378,15 +420,7 @@ def uri_to_outbound(uri: str) -> dict | None:
                         }
                     ]
                 },
-                "streamSettings": _stream_settings(
-                    net=str(data.get("net") or "tcp"),
-                    security=sec,
-                    sni=sni,
-                    fp=str(data.get("fp") or "chrome"),
-                    alpn=str(data.get("alpn") or ""),
-                    path=str(data.get("path") or "/"),
-                    host=host_h,
-                ),
+                "streamSettings": stream,
             }
 
         if base.startswith("trojan://"):
@@ -404,6 +438,21 @@ def uri_to_outbound(uri: str) -> dict | None:
                 return None
             q = parse_qs(parsed.query)
             get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+            stream = _stream_settings(
+                net=get("type", "tcp"),
+                security=get("security", "tls"),
+                sni=get("sni") or get("host") or host,
+                fp=get("fp", "chrome"),
+                alpn=get("alpn", ""),
+                path=get("path", "/"),
+                host=get("host") or get("sni") or host,
+                pbk=get("pbk") or get("publicKey"),
+                sid=get("sid") or get("shortId"),
+                spx=get("spx") or get("spiderX"),
+                grpc_service=get("serviceName"),
+            )
+            if stream is None:
+                return None
             srv: dict = {"address": host, "port": port, "password": pwd}
             if flow := get("flow"):
                 srv["flow"] = flow
@@ -411,19 +460,7 @@ def uri_to_outbound(uri: str) -> dict | None:
                 "protocol": "trojan",
                 "tag": "proxy",
                 "settings": {"servers": [srv]},
-                "streamSettings": _stream_settings(
-                    net=get("type", "tcp"),
-                    security=get("security", "tls"),
-                    sni=get("sni") or get("host") or host,
-                    fp=get("fp", "chrome"),
-                    alpn=get("alpn", ""),
-                    path=get("path", "/"),
-                    host=get("host") or get("sni") or host,
-                    pbk=get("pbk") or get("publicKey"),
-                    sid=get("sid") or get("shortId"),
-                    spx=get("spx") or get("spiderX"),
-                    grpc_service=get("serviceName"),
-                ),
+                "streamSettings": stream,
             }
 
         if base.startswith("ss://"):
@@ -447,7 +484,7 @@ def uri_to_outbound(uri: str) -> dict | None:
 
 def build_xray_config(outbound: dict, socks_port: int) -> dict:
     return {
-        "log": {"loglevel": "warning"},
+        "log": {"loglevel": "error"},
         "inbounds": [
             {
                 "listen": "127.0.0.1",
@@ -485,7 +522,7 @@ def resolve_country(host: str) -> tuple[str, str]:
             f"https://api.country.is/{ip}",
         ):
             try:
-                r = requests.get(url, timeout=2.5)
+                r = requests.get(url, timeout=2.0)
                 if not r.ok:
                     continue
                 d = r.json()
@@ -534,7 +571,7 @@ def is_whitelist(raw_meta: str) -> bool:
 def format_title(uri: str, meta: str, country: tuple[str, str], mbps: float, ms: float) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
-    speed_str = f"{mbps:.1f}Mbps" if mbps > 0 else "OK"
+    speed_str = f"{mbps:.1f}Mbps" if mbps > 0 else "LIVE"
     metrics = f"[{speed_str} | {int(round(ms))}ms]"
     if is_whitelist(combined):
         return f"🇪🇺 white list ({detect_operators(combined)}) {metrics} {BRAND_TAG}"
@@ -556,7 +593,7 @@ def measure_mbps(proxies: dict) -> float:
                         continue
                     downloaded += len(chunk)
                     elapsed = time.perf_counter() - start
-                    if elapsed >= 0.15 and downloaded > 0:
+                    if elapsed >= 0.1 and downloaded > 0:
                         speeds.append((downloaded * 8.0 / (1024 * 1024)) / elapsed)
                     if elapsed >= SPEEDTEST_MAX_SECONDS:
                         break
@@ -585,17 +622,23 @@ def run_xray_and_test(
 
         proc = subprocess.Popen(
             [xray_exe, "run", "-config", cfg_path],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             creationflags=creationflags,
         )
-        time.sleep(0.8)
+        time.sleep(0.5)
 
         if proc.poll() is not None:
-            err_out = (proc.stderr.read() or b"").decode("utf-8", errors="ignore").strip()
+            err_raw = b""
+            if proc.stderr:
+                try:
+                    err_raw = proc.stderr.read() or b""
+                except Exception:
+                    pass
+            err_txt = err_raw.decode("utf-8", errors="ignore").strip()
             if _debug_printed < 5:
                 _debug_printed += 1
-                log(f"[DEBUG XRAY EXIT] {err_out[:250]}")
+                log(f"[DEBUG XRAY EXIT] {err_txt[:220] or 'exit code ' + str(proc.returncode)}")
             return False, 0.0, -1.0, "xray_exited"
 
         proxy_url = f"socks5://127.0.0.1:{socks_port}"
@@ -619,7 +662,7 @@ def run_xray_and_test(
         if ping_ms is None:
             if _debug_printed < 5:
                 _debug_printed += 1
-                log(f"[DEBUG REQ FAIL] {last_err[:250]}")
+                log(f"[DEBUG REQ FAIL] {last_err[:220]}")
             return False, 0.0, -1.0, "no_traffic"
 
         if ping_ms > MAX_PING_MS:
@@ -634,11 +677,13 @@ def run_xray_and_test(
             except OSError:
                 pass
         if proc is not None:
-            proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.terminate()
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            except Exception:
+                pass
         try:
             os.unlink(cfg_path)
         except OSError:
@@ -688,7 +733,7 @@ def collect_sources() -> list[tuple[str, str]]:
         url, m = item
         out: list[tuple[str, str]] = []
         try:
-            r = requests.get(url, timeout=10, headers={"User-Agent": "v2ray-checker/1.0"})
+            r = requests.get(url, timeout=8, headers={"User-Agent": "v2ray-checker/1.0"})
             if r.ok:
                 for u in extract_uris(r.text):
                     frag = unquote(u.split("#", 1)[1]) if "#" in u else ""
@@ -698,7 +743,7 @@ def collect_sources() -> list[tuple[str, str]]:
         return out
 
     if sub_urls:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=10) as pool:
             for fut in as_completed([pool.submit(fetch_sub, s) for s in sub_urls]):
                 for u, m in fut.result():
                     hp = extract_host_port(u)
@@ -739,17 +784,19 @@ def main() -> None:
         hp = extract_host_port(uri)
         if not hp:
             return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_uri"
-        host, _ = hp
+        host, port = hp
         outbound = uri_to_outbound(uri)
         if not outbound:
             return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_outbound"
-        port = port_pool.get()
+        if not tcp_reachable(host, port, timeout=TCP_TIMEOUT):
+            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "tcp_closed"
+        p = port_pool.get()
         try:
-            ok, mbps, ms, reason = run_xray_and_test(xray_exe, outbound, port, timeout=TEST_TIMEOUT)
+            ok, mbps, ms, reason = run_xray_and_test(xray_exe, outbound, p, timeout=TEST_TIMEOUT)
             country = resolve_country(host) if ok else ("🌍", "Европа")
             return ok, uri, meta, mbps, ms, country, reason
         finally:
-            port_pool.put(port)
+            port_pool.put(p)
 
     pool = ThreadPoolExecutor(max_workers=CONCURRENT_CHECKS)
     try:
