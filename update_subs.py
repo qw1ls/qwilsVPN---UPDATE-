@@ -25,6 +25,15 @@ BRAND_TAG = "@qw1lsVPN"
 SUB_FILE = BASE_DIR / "sub.txt"
 README_FILE = BASE_DIR / "README.md"
 
+MAX_PING_MS = 1200
+TEST_TIMEOUT = 6
+SPEEDTEST_MAX_SECONDS = 2.5
+SOCKS_PORT_MIN = 20000
+PORT_POOL_SIZE = 64
+CONCURRENT_CHECKS = 6
+MAX_CANDIDATES = 800
+MAX_RUNTIME_SECONDS = 240
+
 TEST_URLS = [
     "https://www.google.com/generate_204",
     "https://www.gstatic.com/generate_204",
@@ -35,16 +44,6 @@ SPEEDTEST_URLS = [
     "https://speed.cloudflare.com/__down?bytes=1048576",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
 ]
-
-SOCKS_PORT_MIN = 20000
-PORT_POOL_SIZE = 64
-CONCURRENT_CHECKS = 5
-TEST_TIMEOUT = 7
-MAX_PING_MS = 2000
-MIN_SPEED_MBPS = 0.01
-SPEEDTEST_MAX_SECONDS = 2.5
-MAX_CANDIDATES = 600
-MAX_RUNTIME_SECONDS = 240
 
 URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
 
@@ -137,6 +136,7 @@ WHITELIST_KEYWORDS = (
 )
 
 _country_cache: dict[str, tuple[str, str]] = {}
+_debug_printed = 0
 
 
 def log(msg: str) -> None:
@@ -447,7 +447,7 @@ def uri_to_outbound(uri: str) -> dict | None:
 
 def build_xray_config(outbound: dict, socks_port: int) -> dict:
     return {
-        "log": {"loglevel": "error"},
+        "log": {"loglevel": "warning"},
         "inbounds": [
             {
                 "listen": "127.0.0.1",
@@ -476,7 +476,6 @@ def resolve_country(host: str) -> tuple[str, str]:
     try:
         ip = host
         try:
-            import socket
             socket.inet_aton(host)
         except OSError:
             ip = socket.gethostbyname(host)
@@ -535,7 +534,8 @@ def is_whitelist(raw_meta: str) -> bool:
 def format_title(uri: str, meta: str, country: tuple[str, str], mbps: float, ms: float) -> str:
     frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
     combined = f"{frag} {meta}".strip()
-    metrics = f"[{mbps:.1f}Mbps | {int(round(ms))}ms]"
+    speed_str = f"{mbps:.1f}Mbps" if mbps > 0 else "OK"
+    metrics = f"[{speed_str} | {int(round(ms))}ms]"
     if is_whitelist(combined):
         return f"🇪🇺 white list ({detect_operators(combined)}) {metrics} {BRAND_TAG}"
     flag, name = country
@@ -573,10 +573,7 @@ def run_xray_and_test(
     socks_port: int,
     timeout: int = TEST_TIMEOUT,
 ) -> tuple[bool, float, float, str]:
-    """
-    Запускает xray с конфигом, проверяет трафик и задержку (ms) + скорость (Mbps).
-    Возвращает (ok, mbps, ping_ms, reason).
-    """
+    global _debug_printed
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     fd, cfg_path = tempfile.mkstemp(suffix=".json")
     proc = None
@@ -588,16 +585,24 @@ def run_xray_and_test(
 
         proc = subprocess.Popen(
             [xray_exe, "run", "-config", cfg_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             creationflags=creationflags,
         )
-        time.sleep(1.0)
+        time.sleep(0.8)
+
+        if proc.poll() is not None:
+            err_out = (proc.stderr.read() or b"").decode("utf-8", errors="ignore").strip()
+            if _debug_printed < 5:
+                _debug_printed += 1
+                log(f"[DEBUG XRAY EXIT] {err_out[:250]}")
+            return False, 0.0, -1.0, "xray_exited"
 
         proxy_url = f"socks5://127.0.0.1:{socks_port}"
         proxies = {"http": proxy_url, "https": proxy_url}
 
         ping_ms: float | None = None
+        last_err = ""
         for test_url in TEST_URLS:
             t0 = time.perf_counter()
             try:
@@ -606,18 +611,21 @@ def run_xray_and_test(
                 if r.status_code in (200, 204):
                     ping_ms = elapsed_ms
                     break
-            except Exception:
+                last_err = f"http_{r.status_code}"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
                 continue
 
         if ping_ms is None:
+            if _debug_printed < 5:
+                _debug_printed += 1
+                log(f"[DEBUG REQ FAIL] {last_err[:250]}")
             return False, 0.0, -1.0, "no_traffic"
+
         if ping_ms > MAX_PING_MS:
             return False, 0.0, ping_ms, "high_ping"
 
         mbps = measure_mbps(proxies)
-        if mbps < MIN_SPEED_MBPS:
-            return False, 0.0, ping_ms, "low_speed"
-
         return True, mbps, ping_ms, "ok"
     finally:
         if fd >= 0:
@@ -628,7 +636,7 @@ def run_xray_and_test(
         if proc is not None:
             proc.terminate()
             try:
-                proc.wait(timeout=3)
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
         try:
@@ -730,16 +738,16 @@ def main() -> None:
         uri, meta = item
         hp = extract_host_port(uri)
         if not hp:
-            return False, uri, 0.0, -1.0, ("🌍", "Европа"), "bad_uri"
+            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_uri"
         host, _ = hp
         outbound = uri_to_outbound(uri)
         if not outbound:
-            return False, uri, 0.0, -1.0, ("🌍", "Европа"), "bad_outbound"
+            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_outbound"
         port = port_pool.get()
         try:
             ok, mbps, ms, reason = run_xray_and_test(xray_exe, outbound, port, timeout=TEST_TIMEOUT)
             country = resolve_country(host) if ok else ("🌍", "Европа")
-            return ok, uri, mbps, ms, country, reason
+            return ok, uri, meta, mbps, ms, country, reason
         finally:
             port_pool.put(port)
 
@@ -752,15 +760,13 @@ def main() -> None:
                 for f in futures:
                     f.cancel()
                 break
-            uri, meta = candidates[0] if False else ("", "")
             try:
-                ok, uri, mbps, ms, country, reason = fut.result()
+                ok, uri, meta, mbps, ms, country, reason = fut.result()
             except Exception:
-                ok, uri, mbps, ms, country, reason = False, "", 0.0, -1.0, ("🌍", "Европа"), "error"
+                ok, uri, meta, mbps, ms, country, reason = False, "", "", 0.0, -1.0, ("🌍", "Европа"), "error"
             stats[reason] = stats.get(reason, 0) + 1
             if ok:
-                meta_match = next((m for u, m in candidates if clean_uri(u) == clean_uri(uri)), "")
-                title = format_title(uri, meta_match, country, mbps, ms)
+                title = format_title(uri, meta, country, mbps, ms)
                 working.append((clean_uri(uri), title, mbps, ms))
                 log(f"[{idx}/{len(candidates)}] OK {mbps:.1f}Mbps / {ms:.0f}ms -> {title}")
             else:
