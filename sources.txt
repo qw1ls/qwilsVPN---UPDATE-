@@ -39,4 +39,3 @@ https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt
 https://gidroksi.fun/black-list
 https://gidroksi.fun/white-list
 https://raw.githubusercontent.com/WSJuJuB01/WSVPN/refs/heads/main/sub.txt
-https://raw.githubusercontent.com/bobrinaw/vlessforu/refs/heads/main/working_configs.txt
