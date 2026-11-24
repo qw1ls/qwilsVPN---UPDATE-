@@ -1,0 +1,46 @@
+name: Update VPN configs
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vpn-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install "requests[socks]"
+
+      - name: Install Xray
+        run: |
+          bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+          xray -version
+
+      - name: Restore blacklist cache
+        uses: actions/cache@v4
+        with:
+          path: blacklist_local.txt
+          key: vpn-state-${{ github.run_id }}
+          restore-keys: vpn-state-
+
+      - name: Run checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
+        run: checker.py
