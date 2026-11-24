@@ -39,15 +39,32 @@ TEST_URLS = [
 ]
 
 TEST_TIMEOUT = 7
-TCP_TIMEOUT = 1.5
-MAX_PING_MS = 2500
+MAX_PING_MS = 3500
 SOCKS_PORT_MIN = 20000
 PORT_POOL_SIZE = 64
 CONCURRENT_CHECKS = 8
-MAX_CANDIDATES = 1200
-MAX_RUNTIME_SECONDS = 300
+MAX_CANDIDATES = 1800
+MAX_RUNTIME_SECONDS = 320
 
 URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
+REALITY_PBK_RE = re.compile(r"^[A-Za-z0-9_-]{43,44}$")
+REALITY_SID_RE = re.compile(r"^[0-9a-fA-F]{0,32}$")
+
+SS_XRAY_ALLOWED_METHODS = {
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+    "aes-128-gcm",
+    "aes-256-gcm",
+    "chacha20-poly1305",
+    "chacha20-ietf-poly1305",
+    "xchacha20-poly1305",
+    "xchacha20-ietf-poly1305",
+    "none",
+    "plain",
+}
+
+INVALID_HOSTS = {"", "127.0.0.1", "0.0.0.0", "localhost", "::1"}
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -130,33 +147,48 @@ def extract_uris(text: str) -> list[str]:
     return out
 
 
+def _normalize_ss_method(method: str) -> str:
+    m = (method or "").strip().lower()
+    if m == "chacha20-poly1305":
+        return "chacha20-ietf-poly1305"
+    if m == "xchacha20-poly1305":
+        return "xchacha20-ietf-poly1305"
+    return m
+
+
 def _parse_ss(base: str) -> tuple[str, str, str, int] | None:
     body = base[5:]
     try:
         if "@" in body:
             userinfo, hostport = body.rsplit("@", 1)
-            host_part = hostport.split("/", 1)[0].split("?", 1)[0]
-            host, port_s = host_part.rsplit(":", 1)
+            host_part = hostport.split("/", 1)[0].split("?", 1)[0].strip()
+            if host_part.startswith("[") and "]:" in host_part:
+                host, port_s = host_part[1:].rsplit("]:", 1)
+            else:
+                host, port_s = host_part.rsplit(":", 1)
             port = int(port_s)
+            host = host.strip().lower()
             try:
                 dec = _b64_decode(userinfo)
                 if ":" in dec:
                     m, p = dec.split(":", 1)
-                    return m, p, host, port
+                    return _normalize_ss_method(m), p, host, port
             except Exception:
                 pass
             raw_u = unquote(userinfo)
             if ":" in raw_u:
                 m, p = raw_u.split(":", 1)
-                return m, p, host, port
+                return _normalize_ss_method(m), p, host, port
             return None
+
         dec = _b64_decode(body)
         if "@" not in dec:
             return None
         creds, hostport = dec.rsplit("@", 1)
         m, p = creds.split(":", 1)
-        host, port_s = hostport.rsplit(":", 1)
-        return m, p, host, int(port_s)
+        host_part = hostport.split("/", 1)[0].split("?", 1)[0].strip()
+        host, port_s = host_part.rsplit(":", 1)
+        return _normalize_ss_method(m), p, host.strip().lower(), int(port_s)
     except Exception:
         return None
 
@@ -166,42 +198,36 @@ def extract_host_port(uri: str) -> tuple[str, int] | None:
     try:
         if base.startswith(("vless://", "trojan://")):
             parsed = urlparse(base)
-            if not parsed.hostname:
+            host = (parsed.hostname or "").strip().lower()
+            if host in INVALID_HOSTS:
                 return None
-            return parsed.hostname.lower(), int(parsed.port or 443)
+            return host, int(parsed.port or 443)
         if base.startswith("vmess://"):
             data = json.loads(_b64_decode(base[8:]))
-            addr = data.get("add") or data.get("address") or ""
-            if not addr:
+            addr = str(data.get("add") or data.get("address") or "").strip().lower()
+            if addr in INVALID_HOSTS:
                 return None
-            return str(addr).lower(), int(data.get("port", 443))
+            return addr, int(data.get("port", 443))
         if base.startswith("ss://"):
             sp = _parse_ss(base)
-            if not sp:
+            if not sp or sp[2] in INVALID_HOSTS:
                 return None
-            return sp[2].lower(), sp[3]
+            return sp[2], sp[3]
     except Exception:
         return None
     return None
 
 
-def tcp_reachable(host: str, port: int, timeout: float = TCP_TIMEOUT) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except Exception:
-        return False
-
-
 def _is_valid_reality_pbk(pbk: str) -> bool:
-    if not pbk:
+    s = (pbk or "").strip()
+    if not REALITY_PBK_RE.match(s):
         return False
     try:
-        s = pbk.strip().replace("-", "+").replace("_", "/")
-        pad = len(s) % 4
+        b64 = s.replace("-", "+").replace("_", "/")
+        pad = len(b64) % 4
         if pad:
-            s += "=" * (4 - pad)
-        return len(base64.b64decode(s, validate=False)) == 32
+            b64 += "=" * (4 - pad)
+        return len(base64.b64decode(b64, validate=False)) == 32
     except Exception:
         return False
 
@@ -228,12 +254,15 @@ def _build_stream(
     if sec == "reality":
         if not _is_valid_reality_pbk(pbk):
             return None
+        sid_clean = (sid or "").strip()
+        if sid_clean and not REALITY_SID_RE.match(sid_clean):
+            return None
         stream["security"] = "reality"
         rc: dict = {
             "serverName": sni or host or "www.google.com",
             "fingerprint": fp or "chrome",
             "publicKey": pbk.strip(),
-            "shortId": sid.strip(),
+            "shortId": sid_clean,
         }
         if spx.strip():
             rc["spiderX"] = spx.strip()
@@ -282,7 +311,8 @@ def uri_to_outbound(uri: str) -> dict | None:
                 port = int(port_s)
             else:
                 host, port = host_port, 443
-            if not uid or not host:
+            host = host.strip().lower()
+            if not uid or host in INVALID_HOSTS:
                 return None
             q = parse_qs(parsed.query)
             get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
@@ -302,8 +332,9 @@ def uri_to_outbound(uri: str) -> dict | None:
             if stream is None:
                 return None
             user: dict = {"id": uid, "encryption": get("encryption", "none") or "none"}
-            if flow := get("flow"):
-                user["flow"] = flow
+            flow = get("flow")
+            if flow in ("xtls-rprx-vision", "xtls-rprx-visi"):
+                user["flow"] = "xtls-rprx-vision"
             return {
                 "protocol": "vless",
                 "tag": "proxy",
@@ -313,9 +344,9 @@ def uri_to_outbound(uri: str) -> dict | None:
 
         if base.startswith("vmess://"):
             data = json.loads(_b64_decode(base[8:]))
-            addr = str(data.get("add") or data.get("address") or "").strip()
+            addr = str(data.get("add") or data.get("address") or "").strip().lower()
             uid = str(data.get("id") or data.get("uuid") or "").strip()
-            if not addr or not uid:
+            if addr in INVALID_HOSTS or not uid:
                 return None
             port = int(data.get("port", 443))
             tls_on = str(data.get("tls", "")).strip().lower() in ("1", "true", "tls", "yes")
@@ -364,7 +395,8 @@ def uri_to_outbound(uri: str) -> dict | None:
                 port = int(port_s)
             else:
                 host, port = host_port, 443
-            if not pwd or not host:
+            host = host.strip().lower()
+            if not pwd or host in INVALID_HOSTS:
                 return None
             q = parse_qs(parsed.query)
             get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
@@ -385,7 +417,8 @@ def uri_to_outbound(uri: str) -> dict | None:
                 return None
             srv: dict = {"address": host, "port": port, "password": pwd}
             if flow := get("flow"):
-                srv["flow"] = flow
+                if flow in ("xtls-rprx-vision", "xtls-rprx-visi"):
+                    srv["flow"] = "xtls-rprx-vision"
             return {
                 "protocol": "trojan",
                 "tag": "proxy",
@@ -398,6 +431,8 @@ def uri_to_outbound(uri: str) -> dict | None:
             if not sp:
                 return None
             method, password, host, port = sp
+            if host in INVALID_HOSTS or method not in SS_XRAY_ALLOWED_METHODS:
+                return None
             return {
                 "protocol": "shadowsocks",
                 "tag": "proxy",
@@ -438,7 +473,7 @@ def _flag_from_code(cc: str) -> str:
 
 
 def resolve_country(host: str) -> tuple[str, str]:
-    if not host:
+    if not host or host in INVALID_HOSTS:
         return ("🌍", "Сервер")
     if host in _country_cache:
         return _country_cache[host]
@@ -478,9 +513,10 @@ def resolve_country(host: str) -> tuple[str, str]:
     return res
 
 
-def format_title(uri: str, country: tuple[str, str], ms: float) -> str:
+def format_title(country: tuple[str, str], ms: float) -> str:
     flag, name = country
-    return f"{flag} {name} [{int(round(ms))}ms] {BRAND_TAG}"
+    ms_int = max(1, int(round(ms)))
+    return f"{flag} {name} [{ms_int}ms] {BRAND_TAG}"
 
 
 def run_xray_and_test(
@@ -503,7 +539,7 @@ def run_xray_and_test(
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
         )
-        time.sleep(0.7)
+        time.sleep(0.75)
         if proc.poll() is not None:
             return False, -1.0, "xray_exited"
 
@@ -626,12 +662,10 @@ def main() -> None:
         hp = extract_host_port(uri)
         if not hp:
             return False, uri, -1.0, ("🌍", "Сервер"), "bad_uri"
-        host, port = hp
+        host, _ = hp
         outbound = uri_to_outbound(uri)
         if not outbound:
             return False, uri, -1.0, ("🌍", "Сервер"), "bad_outbound"
-        if not tcp_reachable(host, port, timeout=TCP_TIMEOUT):
-            return False, uri, -1.0, ("🌍", "Сервер"), "tcp_closed"
         p = port_pool.get()
         try:
             ok, ms, reason = run_xray_and_test(xray_exe, outbound, p, timeout=TEST_TIMEOUT)
@@ -655,7 +689,7 @@ def main() -> None:
                 ok, uri, ms, country, reason = False, "", -1.0, ("🌍", "Сервер"), "error"
             stats[reason] = stats.get(reason, 0) + 1
             if ok:
-                title = format_title(uri, country, ms)
+                title = format_title(country, ms)
                 working.append((f"{clean_uri(uri)}#{quote(title)}", ms))
                 log(f"[{idx}/{len(candidates)}] OK {ms:.0f}ms -> {title}")
             else:
