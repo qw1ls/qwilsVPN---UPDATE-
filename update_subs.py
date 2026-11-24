@@ -33,18 +33,17 @@ BRAND_TAG = "@qw1lsVPN"
 
 TEST_URLS = [
     "https://www.google.com/generate_204",
-    "https://www.gstatic.com/generate_204",
     "https://cp.cloudflare.com/generate_204",
     "https://ya.ru",
 ]
 
-TEST_TIMEOUT = 7
-MAX_PING_MS = 3500
+TEST_TIMEOUT = 4.5
+MAX_PING_MS = 2500
 SOCKS_PORT_MIN = 20000
-PORT_POOL_SIZE = 64
-CONCURRENT_CHECKS = 8
-MAX_CANDIDATES = 1800
-MAX_RUNTIME_SECONDS = 320
+PORT_POOL_SIZE = 128
+CONCURRENT_CHECKS = 18
+MAX_CANDIDATES = 1500
+MAX_RUNTIME_SECONDS = 310
 
 URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
 REALITY_PBK_RE = re.compile(r"^[A-Za-z0-9_-]{43,44}$")
@@ -488,7 +487,7 @@ def resolve_country(host: str) -> tuple[str, str]:
             f"https://ipwho.is/{ip}",
         ):
             try:
-                r = requests.get(url, timeout=2.0)
+                r = requests.get(url, timeout=1.5)
                 if not r.ok:
                     continue
                 d = r.json()
@@ -523,7 +522,7 @@ def run_xray_and_test(
     xray_exe: str,
     outbound: dict,
     socks_port: int,
-    timeout: int = TEST_TIMEOUT,
+    timeout: float = TEST_TIMEOUT,
 ) -> tuple[bool, float, str]:
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     fd, cfg_path = tempfile.mkstemp(suffix=".json")
@@ -539,13 +538,13 @@ def run_xray_and_test(
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
         )
-        time.sleep(0.75)
+        time.sleep(0.35)
         if proc.poll() is not None:
             return False, -1.0, "xray_exited"
 
         proxy_url = f"socks5://127.0.0.1:{socks_port}"
         proxies = {"http": proxy_url, "https": proxy_url}
-        req_timeout = max(1.5, float(timeout) - 1.0)
+        req_timeout = max(1.5, float(timeout))
 
         for test_url in TEST_URLS:
             t0 = time.perf_counter()
@@ -569,7 +568,7 @@ def run_xray_and_test(
         if proc is not None:
             try:
                 proc.terminate()
-                proc.wait(timeout=2)
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 proc.kill()
             except Exception:
@@ -582,7 +581,7 @@ def run_xray_and_test(
 
 def collect_sources() -> list[str]:
     log(f"Fetching sources from {SOURCES_URL}...")
-    resp = requests.get(SOURCES_URL, timeout=20)
+    resp = requests.get(SOURCES_URL, timeout=15)
     resp.raise_for_status()
     raw = resp.text.strip()
     if "://" not in raw and not raw.startswith(("{", "[")):
@@ -611,7 +610,7 @@ def collect_sources() -> list[str]:
 
     def fetch_sub(url: str) -> list[str]:
         try:
-            r = requests.get(url, timeout=8, headers={"User-Agent": "v2ray-checker/1.0"})
+            r = requests.get(url, timeout=6, headers={"User-Agent": "v2ray-checker/1.0"})
             if r.ok:
                 return extract_uris(r.text)
         except Exception:
@@ -619,7 +618,7 @@ def collect_sources() -> list[str]:
         return []
 
     if sub_urls:
-        with ThreadPoolExecutor(max_workers=10) as pool:
+        with ThreadPoolExecutor(max_workers=12) as pool:
             for fut in as_completed([pool.submit(fetch_sub, u) for u in sub_urls]):
                 for u in fut.result():
                     hp = extract_host_port(u)
