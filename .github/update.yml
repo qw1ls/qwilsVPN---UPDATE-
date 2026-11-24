@@ -2,7 +2,7 @@ name: Update VPN configs
 
 on:
   schedule:
-    - cron: "0 */2 * * *"   # каждые 2 часа
+    - cron: "0 */2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -31,13 +31,10 @@ jobs:
           bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
           xray -version
 
-      # сохраняем чёрный список между запусками
-      - name: Restore cache
+      - name: Restore blacklist cache
         uses: actions/cache@v4
         with:
-          path: |
-            blacklist_local.txt
-            lte
+          path: blacklist_local.txt
           key: vpn-state-${{ github.run_id }}
           restore-keys: vpn-state-
 
@@ -45,5 +42,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SOURCES_LIST_URL: ${{ vars.SOURCES_LIST_URL }}
-        run: python checker.py
+          SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
+        run: checker.py
