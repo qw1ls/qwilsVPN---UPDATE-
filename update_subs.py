@@ -1,53 +1,40 @@
+
+from __future__ import annotations
+
 import base64
 import json
 import os
+import random
 import re
 import shutil
 import socket
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Queue as QueuePort
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
-import requests
-
-BASE_DIR = Path(__file__).resolve().parent
-SOURCES_URL = (
-    "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/"
-    "refs/heads/main/sources.txt"
-)
-BRAND_TAG = "@qw1lsVPN"
-SUB_FILE = BASE_DIR / "sub.txt"
-README_FILE = BASE_DIR / "README.md"
-
-MAX_PING_MS = 2500
-TCP_TIMEOUT = 1.3
-TEST_TIMEOUT = 5
-SPEEDTEST_MAX_SECONDS = 2.0
-SOCKS_PORT_MIN = 20000
-PORT_POOL_SIZE = 128
-CONCURRENT_CHECKS = 10
-MAX_CANDIDATES = 2000
-MAX_RUNTIME_SECONDS = 320
-
+TEST_URL = "https://ya.ru"
 TEST_URLS = [
-    "https://www.google.com/generate_204",
-    "https://www.gstatic.com/generate_204",
+    "https://ya.ru",
+    "https://www.vk.com",
     "https://cp.cloudflare.com/generate_204",
+    "https://www.gstatic.com/generate_204",
 ]
 
-SPEEDTEST_URLS = [
-    "https://speed.cloudflare.com/__down?bytes=524288",
-    "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
-]
+TEST_TIMEOUT = 8
+SOCKS_PORT_MIN = 20000
+SOCKS_PORT_MAX = 29999
+PORT_POOL_SIZE = 64
+BATCH_SAVE_EVERY = 10
+BRAND_TAG = "@qw1lsVPN"
 
-URI_REGEX = re.compile(r'(?:vless|vmess|trojan|ss)://[^\s"\'<>`]+', re.IGNORECASE)
+URI_REGEX = re.compile(r'(?:vless|vmess|trojan)://[^\s"\'<>`]+', re.IGNORECASE)
 
 COUNTRY_MAP = {
     "RU": ("🇷🇺", "Россия"),
@@ -78,93 +65,24 @@ COUNTRY_MAP = {
     "RO": ("🇷🇴", "Румыния"),
 }
 
-COUNTRY_RU_TRANSLATION = {
-    "Russia": "Россия",
-    "Germany": "Германия",
-    "Netherlands": "Нидерланды",
-    "Finland": "Финляндия",
-    "Sweden": "Швеция",
-    "France": "Франция",
-    "United Kingdom": "Великобритания",
-    "United States": "США",
-    "Poland": "Польша",
-    "Lithuania": "Литва",
-    "Latvia": "Латвия",
-    "Estonia": "Эстония",
-    "Switzerland": "Швейцария",
-    "Austria": "Австрия",
-    "Czechia": "Чехия",
-    "Czech Republic": "Чехия",
-    "Turkey": "Турция",
-    "Turkiye": "Турция",
-    "Kazakhstan": "Казахстан",
-    "United Arab Emirates": "ОАЭ",
-    "Singapore": "Сингапур",
-    "Japan": "Япония",
-    "Canada": "Канада",
-    "Hong Kong": "Гонконг",
-    "Moldova": "Молдова",
-    "Bulgaria": "Болгария",
-    "Romania": "Румыния",
-}
-
-OPERATORS_MAP = {
-    "mts": "МТС",
-    "мтс": "МТС",
-    "megafon": "Мегафон",
-    "мегафон": "Мегафон",
-    "beeline": "Билайн",
-    "билайн": "Билайн",
-    "t2": "T2",
-    "tele2": "T2",
-    "теле2": "T2",
-    "yota": "Yota",
-    "йота": "Yota",
-}
-
-WHITELIST_KEYWORDS = (
-    "white list",
-    "whitelist",
-    "white_list",
-    "белый список",
-    "белые списки",
-    "mobile",
-    "cidr",
-    "lte",
-    "4g",
-    "5g",
-    "white",
-    "wl",
-)
-
 _country_cache: dict[str, tuple[str, str]] = {}
-_debug_printed = 0
-
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
 
 
 def find_xray() -> str | None:
-    name = "xray.exe" if sys.platform == "win32" else "xray"
-    found = shutil.which(name)
+    """Locate xray executable in PATH or common local folders."""
+    exe_name = "xray.exe" if sys.platform == "win32" else "xray"
+    found = shutil.which(exe_name)
     if found:
         return found
-    for base in [BASE_DIR, Path("."), Path.home() / "xray", Path("/usr/local/bin")]:
-        exe = base / name
-        if exe.exists():
-            return str(exe)
+    here = Path(__file__).resolve().parent
+    for folder in (here, Path("."), Path.home() / "xray", Path("/usr/local/bin")):
+        candidate = folder / exe_name
+        if candidate.is_file():
+            return str(candidate)
     return None
 
 
-def _make_port_pool() -> Queue[int]:
-    q: Queue[int] = Queue()
-    for i in range(PORT_POOL_SIZE):
-        q.put(SOCKS_PORT_MIN + i)
-    return q
-
-
-def _b64_decode(s: str) -> str:
+def _b64_decode_text(s: str) -> str:
     cleaned = "".join(s.strip().split()).replace("-", "+").replace("_", "/")
     pad = len(cleaned) % 4
     if pad:
@@ -172,109 +90,196 @@ def _b64_decode(s: str) -> str:
     return base64.b64decode(cleaned, validate=False).decode("utf-8", errors="ignore")
 
 
-def clean_uri(uri: str) -> str:
-    return uri.split("#", 1)[0].strip()
-
-
-def extract_uris(text: str) -> list[str]:
-    if not text:
+def decode_subscription(source: str) -> list[str]:
+    """Extract vmess://, vless://, and trojan:// links from plain text or base64."""
+    if not source:
         return []
-    items: list[str] = list(URI_REGEX.findall(text))
-    if "://" not in text:
-        try:
-            decoded = _b64_decode(text)
-            if "://" in decoded:
-                items.extend(URI_REGEX.findall(decoded))
-        except Exception:
-            pass
-    unique: list[str] = []
+    links: list[str] = []
     seen: set[str] = set()
-    for u in items:
-        u = u.strip()
+
+    for m in URI_REGEX.findall(source):
+        u = m.strip()
         if u and u not in seen:
             seen.add(u)
-            unique.append(u)
-    return unique
+            links.append(u)
+
+    if not links:
+        try:
+            decoded = _b64_decode_text(source)
+            for m in URI_REGEX.findall(decoded):
+                u = m.strip()
+                if u and u not in seen:
+                    seen.add(u)
+                    links.append(u)
+        except Exception:
+            pass
+
+    return links
 
 
-def _parse_ss(base: str) -> tuple[str, str, str, int] | None:
-    body = base[5:]
+def parse_json_subscription(source: str) -> list[tuple[str, dict]] | None:
+    """Parse a JSON array of full Xray configs if source is a JSON config list."""
+    stripped = source.strip()
+    if not stripped.startswith("["):
+        return None
     try:
-        if "@" in body:
-            userinfo, hostport = body.rsplit("@", 1)
-            host_part = hostport.split("/", 1)[0].split("?", 1)[0]
-            host, port_s = host_part.rsplit(":", 1)
-            port = int(port_s)
-            try:
-                dec = _b64_decode(userinfo)
-                if ":" in dec:
-                    m, p = dec.split(":", 1)
-                    return m, p, host, port
-            except Exception:
-                pass
-            raw_u = unquote(userinfo)
-            if ":" in raw_u:
-                m, p = raw_u.split(":", 1)
-                return m, p, host, port
-            return None
-        dec = _b64_decode(body)
-        if "@" not in dec:
-            return None
-        creds, hostport = dec.rsplit("@", 1)
-        m, p = creds.split(":", 1)
-        host, port_s = hostport.rsplit(":", 1)
-        return m, p, host, int(port_s)
+        data = json.loads(stripped)
     except Exception:
         return None
+    if not isinstance(data, list):
+        return None
+
+    out: list[tuple[str, dict]] = []
+    for idx, item in enumerate(data):
+        if isinstance(item, dict) and isinstance(item.get("outbounds"), list):
+            remark = str(item.get("remark") or item.get("remarks") or f"JSON-Node-{idx + 1}")[:50]
+            out.append((remark, item))
+    return out or None
 
 
-def extract_host_port(uri: str) -> tuple[str, int] | None:
-    base = clean_uri(uri)
+def get_proxy_outbound_from_config(cfg: dict) -> dict | None:
+    for ob in cfg.get("outbounds") or []:
+        if isinstance(ob, dict) and ob.get("protocol") in ("vless", "vmess", "trojan"):
+            return ob
+    return None
+
+
+def get_outbound_server_port(outbound: dict) -> tuple[str, int] | None:
     try:
-        if base.startswith(("vless://", "trojan://")):
-            parsed = urlparse(base)
-            if not parsed.hostname:
-                return None
-            return parsed.hostname.lower(), int(parsed.port or 443)
-        if base.startswith("vmess://"):
-            data = json.loads(_b64_decode(base[8:]))
-            addr = data.get("add") or data.get("address") or ""
-            if not addr:
-                return None
-            return str(addr).lower(), int(data.get("port", 443))
-        if base.startswith("ss://"):
-            sp = _parse_ss(base)
-            if not sp:
-                return None
-            return sp[2].lower(), sp[3]
+        proto = outbound.get("protocol")
+        settings = outbound.get("settings") or {}
+        if proto in ("vless", "vmess"):
+            vnext = settings.get("vnext") or []
+            if vnext:
+                srv = vnext[0]
+                return str(srv["address"]).lower(), int(srv.get("port", 443))
+        elif proto == "trojan":
+            servers = settings.get("servers") or []
+            if servers:
+                srv = servers[0]
+                return str(srv["address"]).lower(), int(srv.get("port", 443))
     except Exception:
         return None
     return None
 
 
-def tcp_reachable(host: str, port: int, timeout: float = TCP_TIMEOUT) -> bool:
+def build_test_config_from_json(full_config: dict, socks_port: int) -> dict:
+    proxy_ob = get_proxy_outbound_from_config(full_config)
+    if proxy_ob is None:
+        return build_xray_config({}, socks_port)
+    return build_xray_config(proxy_ob, socks_port)
+
+
+def _outbound_to_link(outbound: dict, remark: str) -> str | None:
+    """Best-effort conversion from outbound back to shareable URI."""
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
+        proto = outbound.get("protocol")
+        settings = outbound.get("settings") or {}
+        stream = outbound.get("streamSettings") or {}
+        net = stream.get("network") or "tcp"
+        sec = stream.get("security") or "none"
+        tag = quote(remark) if remark else ""
+
+        if proto == "vless":
+            vnext = (settings.get("vnext") or [])[0]
+            user = (vnext.get("users") or [])[0]
+            host = vnext["address"]
+            port = int(vnext.get("port", 443))
+            uid = quote(str(user["id"]))
+            params: list[str] = [f"encryption={quote(str(user.get('encryption') or 'none'))}", f"type={quote(str(net))}"]
+            if user.get("flow"):
+                params.append(f"flow={quote(str(user['flow']))}")
+            params.append(f"security={quote(str(sec))}")
+
+            if sec == "reality":
+                rc = stream.get("realitySettings") or {}
+                if rc.get("serverName"):
+                    params.append(f"sni={quote(str(rc['serverName']))}")
+                if rc.get("fingerprint"):
+                    params.append(f"fp={quote(str(rc['fingerprint']))}")
+                if rc.get("publicKey"):
+                    params.append(f"pbk={quote(str(rc['publicKey']))}")
+                if rc.get("shortId"):
+                    params.append(f"sid={quote(str(rc['shortId']))}")
+                if rc.get("spiderX"):
+                    params.append(f"spx={quote(str(rc['spiderX']))}")
+            elif sec == "tls":
+                tc = stream.get("tlsSettings") or {}
+                if tc.get("serverName"):
+                    params.append(f"sni={quote(str(tc['serverName']))}")
+                if tc.get("fingerprint"):
+                    params.append(f"fp={quote(str(tc['fingerprint']))}")
+                if tc.get("alpn"):
+                    params.append(f"alpn={quote(','.join(tc['alpn']))}")
+
+            if net == "ws":
+                wc = stream.get("wsSettings") or {}
+                if wc.get("path"):
+                    params.append(f"path={quote(str(wc['path']))}")
+                hdr_host = (wc.get("headers") or {}).get("Host")
+                if hdr_host:
+                    params.append(f"host={quote(str(hdr_host))}")
+            elif net == "grpc":
+                gc = stream.get("grpcSettings") or {}
+                if gc.get("serviceName"):
+                    params.append(f"serviceName={quote(str(gc['serviceName']))}")
+
+            q_str = "&".join(params)
+            return f"vless://{uid}@{host}:{port}?{q_str}#{tag}"
+
+        if proto == "trojan":
+            srv = (settings.get("servers") or [])[0]
+            host = srv["address"]
+            port = int(srv.get("port", 443))
+            pwd = quote(str(srv["password"]))
+            params = [f"type={quote(str(net))}", f"security={quote(str(sec))}"]
+            tc = stream.get("tlsSettings") or {}
+            if tc.get("serverName"):
+                params.append(f"sni={quote(str(tc['serverName']))}")
+            if tc.get("fingerprint"):
+                params.append(f"fp={quote(str(tc['fingerprint']))}")
+            if net == "ws":
+                wc = stream.get("wsSettings") or {}
+                if wc.get("path"):
+                    params.append(f"path={quote(str(wc['path']))}")
+                hdr_host = (wc.get("headers") or {}).get("Host")
+                if hdr_host:
+                    params.append(f"host={quote(str(hdr_host))}")
+            elif net == "grpc":
+                gc = stream.get("grpcSettings") or {}
+                if gc.get("serviceName"):
+                    params.append(f"serviceName={quote(str(gc['serviceName']))}")
+            return f"trojan://{pwd}@{host}:{port}?{'&'.join(params)}#{tag}"
+
+        if proto == "vmess":
+            vnext = (settings.get("vnext") or [])[0]
+            user = (vnext.get("users") or [])[0]
+            wc = stream.get("wsSettings") or {}
+            gc = stream.get("grpcSettings") or {}
+            tc = stream.get("tlsSettings") or {}
+            payload = {
+                "v": "2",
+                "ps": remark or "VMess",
+                "add": vnext["address"],
+                "port": int(vnext.get("port", 443)),
+                "id": user["id"],
+                "aid": int(user.get("alterId", 0) or 0),
+                "scy": user.get("security") or "auto",
+                "net": net,
+                "type": "none",
+                "host": (wc.get("headers") or {}).get("Host") or tc.get("serverName") or "",
+                "path": wc.get("path") or gc.get("serviceName") or "/",
+                "tls": "tls" if sec == "tls" else "",
+                "sni": tc.get("serverName") or "",
+            }
+            b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+            return f"vmess://{b64}"
     except Exception:
-        return False
+        return None
+    return None
 
 
-def _is_valid_reality_pbk(pbk: str) -> bool:
-    if not pbk:
-        return False
-    try:
-        s = pbk.strip().replace("-", "+").replace("_", "/")
-        pad = len(s) % 4
-        if pad:
-            s += "=" * (4 - pad)
-        raw = base64.b64decode(s, validate=False)
-        return len(raw) == 32
-    except Exception:
-        return False
-
-
-def _stream_settings(
+def _build_stream(
     net: str = "tcp",
     security: str = "none",
     sni: str = "",
@@ -286,36 +291,34 @@ def _stream_settings(
     sid: str = "",
     spx: str = "",
     grpc_service: str = "",
-) -> dict | None:
+) -> dict:
     ns = net.lower() if net.lower() in ("tcp", "ws", "grpc", "http", "h2") else "tcp"
     sec = security.lower()
     if sec == "none" and pbk:
         sec = "reality"
 
     stream: dict = {"network": ns}
-    if sec == "reality":
-        if not _is_valid_reality_pbk(pbk):
-            return None
+    if sec == "reality" and pbk:
         stream["security"] = "reality"
-        real_cfg: dict = {
+        rc: dict = {
             "serverName": sni or host or "www.google.com",
             "fingerprint": fp or "chrome",
-            "publicKey": pbk.strip(),
-            "shortId": sid.strip(),
+            "publicKey": pbk,
+            "shortId": sid or "",
         }
-        if spx.strip():
-            real_cfg["spiderX"] = spx.strip()
-        stream["realitySettings"] = real_cfg
+        if spx:
+            rc["spiderX"] = spx
+        stream["realitySettings"] = rc
     elif sec == "tls":
-        tls_cfg: dict = {
+        tc: dict = {
             "serverName": sni or host,
             "fingerprint": fp or "chrome",
             "allowInsecure": True,
         }
         if alpn:
-            tls_cfg["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
+            tc["alpn"] = [x.strip() for x in alpn.split(",") if x.strip()]
         stream["security"] = "tls"
-        stream["tlsSettings"] = tls_cfg
+        stream["tlsSettings"] = tc
     else:
         stream["security"] = "none"
 
@@ -336,25 +339,74 @@ def _stream_settings(
     return stream
 
 
-def uri_to_outbound(uri: str) -> dict | None:
-    base = clean_uri(uri)
+def parse_vmess(link: str) -> dict | None:
     try:
-        if base.startswith("vless://"):
-            parsed = urlparse(base)
-            if "@" not in parsed.netloc:
-                return None
-            uid_raw, host_port = parsed.netloc.rsplit("@", 1)
-            uid = unquote(uid_raw)
-            if ":" in host_port:
-                host, port_s = host_port.rsplit(":", 1)
-                port = int(port_s)
-            else:
-                host, port = host_port, 443
-            if not uid or not host:
-                return None
-            q = parse_qs(parsed.query)
-            get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
-            stream = _stream_settings(
+        data = json.loads(_b64_decode_text(link[8:]))
+        addr = str(data.get("add") or data.get("address") or "").strip()
+        uid = str(data.get("id") or data.get("uuid") or "").strip()
+        if not addr or not uid:
+            return None
+        port = int(data.get("port", 443))
+        tls_on = str(data.get("tls", "")).strip().lower() in ("1", "true", "tls", "yes")
+        sni = str(data.get("sni") or data.get("host") or addr).strip()
+        host_h = str(data.get("host") or sni).strip()
+        return {
+            "protocol": "vmess",
+            "tag": "proxy",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": addr,
+                        "port": port,
+                        "users": [
+                            {
+                                "id": uid,
+                                "alterId": int(data.get("aid", 0) or 0),
+                                "security": str(data.get("scy") or "auto"),
+                            }
+                        ],
+                    }
+                ]
+            },
+            "streamSettings": _build_stream(
+                net=str(data.get("net") or "tcp"),
+                security="tls" if tls_on else "none",
+                sni=sni,
+                fp=str(data.get("fp") or "chrome"),
+                alpn=str(data.get("alpn") or ""),
+                path=str(data.get("path") or "/"),
+                host=host_h,
+            ),
+        }
+    except Exception:
+        return None
+
+
+def parse_vless(link: str) -> dict | None:
+    try:
+        base = link.split("#", 1)[0].strip()
+        parsed = urlparse(base)
+        if "@" not in parsed.netloc:
+            return None
+        uid_raw, host_port = parsed.netloc.rsplit("@", 1)
+        uid = unquote(uid_raw).strip()
+        if ":" in host_port:
+            host, port_s = host_port.rsplit(":", 1)
+            port = int(port_s)
+        else:
+            host, port = host_port, 443
+        if not uid or not host:
+            return None
+        q = parse_qs(parsed.query)
+        get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+        user: dict = {"id": uid, "encryption": get("encryption", "none") or "none"}
+        if flow := get("flow"):
+            user["flow"] = flow
+        return {
+            "protocol": "vless",
+            "tag": "proxy",
+            "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+            "streamSettings": _build_stream(
                 net=get("type", "tcp"),
                 security=get("security", "none"),
                 sni=get("sni") or get("host") or host,
@@ -366,79 +418,37 @@ def uri_to_outbound(uri: str) -> dict | None:
                 sid=get("sid") or get("shortId"),
                 spx=get("spx") or get("spiderX"),
                 grpc_service=get("serviceName"),
-            )
-            if stream is None:
-                return None
-            flow = get("flow")
-            user: dict = {"id": uid, "encryption": get("encryption", "none") or "none"}
-            if flow:
-                user["flow"] = flow
-            return {
-                "protocol": "vless",
-                "tag": "proxy",
-                "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
-                "streamSettings": stream,
-            }
+            ),
+        }
+    except Exception:
+        return None
 
-        if base.startswith("vmess://"):
-            data = json.loads(_b64_decode(base[8:]))
-            addr = str(data.get("add") or data.get("address") or "").strip()
-            uid = str(data.get("id") or data.get("uuid") or "").strip()
-            if not addr or not uid:
-                return None
-            port = int(data.get("port", 443))
-            tls_flag = str(data.get("tls", "")).strip().lower() in ("1", "true", "tls", "yes")
-            sec = "tls" if tls_flag else "none"
-            sni = str(data.get("sni") or data.get("host") or addr).strip()
-            host_h = str(data.get("host") or sni).strip()
-            stream = _stream_settings(
-                net=str(data.get("net") or "tcp"),
-                security=sec,
-                sni=sni,
-                fp=str(data.get("fp") or "chrome"),
-                alpn=str(data.get("alpn") or ""),
-                path=str(data.get("path") or "/"),
-                host=host_h,
-            )
-            if stream is None:
-                return None
-            return {
-                "protocol": "vmess",
-                "tag": "proxy",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": addr,
-                            "port": port,
-                            "users": [
-                                {
-                                    "id": uid,
-                                    "alterId": int(data.get("aid", 0) or 0),
-                                    "security": str(data.get("scy") or "auto"),
-                                }
-                            ],
-                        }
-                    ]
-                },
-                "streamSettings": stream,
-            }
 
-        if base.startswith("trojan://"):
-            parsed = urlparse(base)
-            if "@" not in parsed.netloc:
-                return None
-            pwd_raw, host_port = parsed.netloc.rsplit("@", 1)
-            pwd = unquote(pwd_raw)
-            if ":" in host_port:
-                host, port_s = host_port.rsplit(":", 1)
-                port = int(port_s)
-            else:
-                host, port = host_port, 443
-            if not pwd or not host:
-                return None
-            q = parse_qs(parsed.query)
-            get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
-            stream = _stream_settings(
+def parse_trojan(link: str) -> dict | None:
+    try:
+        base = link.split("#", 1)[0].strip()
+        parsed = urlparse(base)
+        if "@" not in parsed.netloc:
+            return None
+        pwd_raw, host_port = parsed.netloc.rsplit("@", 1)
+        pwd = unquote(pwd_raw).strip()
+        if ":" in host_port:
+            host, port_s = host_port.rsplit(":", 1)
+            port = int(port_s)
+        else:
+            host, port = host_port, 443
+        if not pwd or not host:
+            return None
+        q = parse_qs(parsed.query)
+        get = lambda k, d="": unquote((q.get(k) or [d])[0]).strip()
+        srv: dict = {"address": host, "port": port, "password": pwd}
+        if flow := get("flow"):
+            srv["flow"] = flow
+        return {
+            "protocol": "trojan",
+            "tag": "proxy",
+            "settings": {"servers": [srv]},
+            "streamSettings": _build_stream(
                 net=get("type", "tcp"),
                 security=get("security", "tls"),
                 sni=get("sni") or get("host") or host,
@@ -450,39 +460,26 @@ def uri_to_outbound(uri: str) -> dict | None:
                 sid=get("sid") or get("shortId"),
                 spx=get("spx") or get("spiderX"),
                 grpc_service=get("serviceName"),
-            )
-            if stream is None:
-                return None
-            srv: dict = {"address": host, "port": port, "password": pwd}
-            if flow := get("flow"):
-                srv["flow"] = flow
-            return {
-                "protocol": "trojan",
-                "tag": "proxy",
-                "settings": {"servers": [srv]},
-                "streamSettings": stream,
-            }
-
-        if base.startswith("ss://"):
-            sp = _parse_ss(base)
-            if not sp:
-                return None
-            method, password, host, port = sp
-            return {
-                "protocol": "shadowsocks",
-                "tag": "proxy",
-                "settings": {
-                    "servers": [
-                        {"address": host, "port": port, "method": method, "password": password}
-                    ]
-                },
-            }
+            ),
+        }
     except Exception:
         return None
+
+
+def parse_link(link: str) -> dict | None:
+    """Parse one proxy link into Xray outbound, or None if unsupported."""
+    link = link.strip()
+    if link.startswith("vmess://"):
+        return parse_vmess(link)
+    if link.startswith("vless://"):
+        return parse_vless(link)
+    if link.startswith("trojan://"):
+        return parse_trojan(link)
     return None
 
 
 def build_xray_config(outbound: dict, socks_port: int) -> dict:
+    """Full Xray config: SOCKS inbound + proxy outbound + direct fallback."""
     return {
         "log": {"loglevel": "error"},
         "inbounds": [
@@ -500,14 +497,17 @@ def build_xray_config(outbound: dict, socks_port: int) -> dict:
     }
 
 
-def country_flag(cc: str) -> str:
+def _flag_from_code(cc: str) -> str:
     if not cc or len(cc) != 2 or not cc.isalpha():
         return "🌍"
     cc = cc.upper()
     return chr(ord(cc[0]) + 0x1F1A5) + chr(ord(cc[1]) + 0x1F1A5)
 
 
-def resolve_country(host: str) -> tuple[str, str]:
+def resolve_country_ru(host: str) -> tuple[str, str]:
+    """Resolve (flag, Russian country name) for a hostname or IPv4 address."""
+    if not host:
+        return ("🌍", "Сервер")
     if host in _country_cache:
         return _country_cache[host]
     try:
@@ -516,328 +516,495 @@ def resolve_country(host: str) -> tuple[str, str]:
             socket.inet_aton(host)
         except OSError:
             ip = socket.gethostbyname(host)
+
+        import requests
+
         for url in (
             f"http://ip-api.com/json/{ip}?fields=status,countryCode,country",
             f"https://ipwho.is/{ip}",
-            f"https://api.country.is/{ip}",
         ):
             try:
                 r = requests.get(url, timeout=2.0)
                 if not r.ok:
                     continue
-                d = r.json()
-                cc = (d.get("countryCode") or d.get("country_code") or d.get("country") or "").upper()
-                cname = (d.get("country") or "").strip()
+                data = r.json()
+                cc = (data.get("countryCode") or data.get("country_code") or "").upper()
                 if cc == "UK":
                     cc = "GB"
                 if cc in COUNTRY_MAP:
                     res = COUNTRY_MAP[cc]
                     _country_cache[host] = res
                     return res
-                if cname in COUNTRY_RU_TRANSLATION:
-                    res = (country_flag(cc), COUNTRY_RU_TRANSLATION[cname])
-                    _country_cache[host] = res
-                    return res
                 if len(cc) == 2 and cc.isalpha():
-                    res = (country_flag(cc), cname or cc)
+                    cname = (data.get("country") or cc).strip()
+                    res = (_flag_from_code(cc), cname)
                     _country_cache[host] = res
                     return res
             except Exception:
                 continue
     except Exception:
         pass
-    res = ("🌍", "Европа")
+
+    res = ("🌍", "Сервер")
     _country_cache[host] = res
     return res
 
 
-def detect_operators(raw_meta: str) -> str:
-    lower = raw_meta.lower()
-    if "все оператор" in lower or "all" in lower:
-        return "все операторы"
-    found: list[str] = []
-    for k, label in OPERATORS_MAP.items():
-        if re.search(rf"(?<![a-zа-я0-9]){re.escape(k)}(?![a-zа-я0-9])", lower):
-            if label not in found:
-                found.append(label)
-    return ", ".join(found) if found else "все операторы"
+def format_qwils_remark(host: str, ping_ms: float, fallback_remark: str = "") -> str:
+    flag, country_name = resolve_country_ru(host)
+    ms_int = max(1, int(round(ping_ms)))
+    base_name = f"{flag} {country_name}"
+    if fallback_remark and any(k in fallback_remark.lower() for k in ("white", "wl", "бел", "mobile", "lte", "4g", "5g")):
+        base_name = f"🇪🇺 white list ({fallback_remark[:24]})"
+    return f"{base_name} [{ms_int}ms] {BRAND_TAG}"
 
 
-def is_whitelist(raw_meta: str) -> bool:
-    lower = raw_meta.lower()
-    return any(kw in lower for kw in WHITELIST_KEYWORDS)
+def apply_remark_to_link(link: str, new_remark: str) -> str:
+    base_link = link.split("#", 1)[0].strip()
+    return f"{base_link}#{quote(new_remark)}"
 
 
-def format_title(uri: str, meta: str, country: tuple[str, str], mbps: float, ms: float) -> str:
-    frag = unquote(uri.split("#", 1)[1]) if "#" in uri else ""
-    combined = f"{frag} {meta}".strip()
-    speed_str = f"{mbps:.1f}Mbps" if mbps > 0 else "LIVE"
-    metrics = f"[{speed_str} | {int(round(ms))}ms]"
-    if is_whitelist(combined):
-        return f"🇪🇺 white list ({detect_operators(combined)}) {metrics} {BRAND_TAG}"
-    flag, name = country
-    return f"{flag or '🌍'} {name or 'Европа'} {metrics} {BRAND_TAG}"
-
-
-def measure_mbps(proxies: dict) -> float:
-    speeds: list[float] = []
-    for url in SPEEDTEST_URLS:
-        try:
-            downloaded = 0
-            start = time.perf_counter()
-            with requests.get(url, proxies=proxies, timeout=TEST_TIMEOUT, stream=True) as r:
-                if r.status_code != 200:
-                    continue
-                for chunk in r.iter_content(chunk_size=16384):
-                    if not chunk:
-                        continue
-                    downloaded += len(chunk)
-                    elapsed = time.perf_counter() - start
-                    if elapsed >= 0.1 and downloaded > 0:
-                        speeds.append((downloaded * 8.0 / (1024 * 1024)) / elapsed)
-                    if elapsed >= SPEEDTEST_MAX_SECONDS:
-                        break
-            if speeds:
-                return statistics.median(speeds)
-        except Exception:
-            continue
-    return 0.0
-
-
-def run_xray_and_test(
-    xray_exe: str,
-    outbound: dict,
-    socks_port: int,
-    timeout: int = TEST_TIMEOUT,
-) -> tuple[bool, float, float, str]:
-    global _debug_printed
+def run_xray_and_test(config_path: str, socks_port: int, timeout: int = TEST_TIMEOUT) -> tuple[bool, str, float]:
+    """
+    Run Xray with config and test real traffic through local SOCKS5 proxy.
+    Returns (success, result_str, ping_ms). ping_ms is -1 on failure.
+    """
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    fd, cfg_path = tempfile.mkstemp(suffix=".json")
-    proc = None
+    xray_path = find_xray()
+    if not xray_path:
+        return (False, "xray not found", -1.0)
+
+    proc = subprocess.Popen(
+        [xray_path, "run", "-config", config_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+
+    def fail(result_str: str) -> tuple[bool, str, float]:
+        return (False, result_str, -1.0)
+
+    req_timeout = max(1.5, float(timeout) - 1.5)
+
     try:
-        cfg_data = build_xray_config(outbound, socks_port)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(cfg_data, f)
-        fd = -1
-
-        proc = subprocess.Popen(
-            [xray_exe, "run", "-config", cfg_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            creationflags=creationflags,
-        )
-        time.sleep(0.5)
-
+        time.sleep(0.8)
         if proc.poll() is not None:
-            err_raw = b""
-            if proc.stderr:
-                try:
-                    err_raw = proc.stderr.read() or b""
-                except Exception:
-                    pass
-            err_txt = err_raw.decode("utf-8", errors="ignore").strip()
-            if _debug_printed < 5:
-                _debug_printed += 1
-                log(f"[DEBUG XRAY EXIT] {err_txt[:220] or 'exit code ' + str(proc.returncode)}")
-            return False, 0.0, -1.0, "xray_exited"
+            return fail("xray exited")
 
         proxy_url = f"socks5://127.0.0.1:{socks_port}"
         proxies = {"http": proxy_url, "https": proxy_url}
 
-        ping_ms: float | None = None
-        last_err = ""
-        for test_url in TEST_URLS:
-            t0 = time.perf_counter()
-            try:
-                r = requests.get(test_url, proxies=proxies, timeout=timeout)
-                elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                if r.status_code in (200, 204):
-                    ping_ms = elapsed_ms
-                    break
-                last_err = f"http_{r.status_code}"
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-                continue
+        try:
+            import requests
 
-        if ping_ms is None:
-            if _debug_printed < 5:
-                _debug_printed += 1
-                log(f"[DEBUG REQ FAIL] {last_err[:220]}")
-            return False, 0.0, -1.0, "no_traffic"
+            last_err = "no connection"
+            for test_url in TEST_URLS:
+                t0 = time.perf_counter()
+                try:
+                    r = requests.get(test_url, proxies=proxies, timeout=req_timeout)
+                    ping_ms = (time.perf_counter() - t0) * 1000.0
+                    if r.status_code in (200, 204, 301, 302):
+                        return (True, str(r.status_code), ping_ms)
+                    last_err = f"HTTP {r.status_code}"
+                except requests.exceptions.Timeout:
+                    last_err = "timeout"
+                except requests.exceptions.ProxyError:
+                    last_err = "proxy error"
+                except requests.exceptions.ConnectionError:
+                    last_err = "connection failed"
+                except Exception as e:
+                    last_err = type(e).__name__
 
-        if ping_ms > MAX_PING_MS:
-            return False, 0.0, ping_ms, "high_ping"
+            return fail(last_err)
+        except ImportError:
+            try:
+                import socks
 
-        mbps = measure_mbps(proxies)
-        return True, mbps, ping_ms, "ok"
-    finally:
-        if fd >= 0:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                t0 = time.perf_counter()
+                sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(req_timeout)
+                sock.setproxy(socks.SOCKS5, "127.0.0.1", socks_port)
+                sock.connect(("ya.ru", 443))
+                ping_ms = (time.perf_counter() - t0) * 1000.0
+                sock.close()
+                return (True, "OK", ping_ms)
             except Exception:
-                pass
+                return fail("no connection")
+    finally:
+        proc.terminate()
         try:
-            os.unlink(cfg_path)
-        except OSError:
-            pass
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
-def collect_sources() -> list[tuple[str, str]]:
-    log(f"Fetching sources from {SOURCES_URL}...")
-    resp = requests.get(SOURCES_URL, timeout=20)
-    resp.raise_for_status()
-    raw = resp.text.strip()
-    if "://" not in raw and not raw.startswith(("{", "[")):
+def get_remark(link: str) -> str:
+    """Extract remark/name from link (e.g. after # in vless/trojan or ps in vmess)."""
+    if "#" in link:
+        return unquote(link.split("#", 1)[1].strip()[:50])
+    if link.startswith("vmess://"):
         try:
-            raw = _b64_decode(raw)
+            o = json.loads(_b64_decode_text(link[8:]))
+            return str(o.get("ps") or o.get("name") or "")[:50]
         except Exception:
             pass
-
-    candidates: list[tuple[str, str]] = []
-    sub_urls: list[tuple[str, str]] = []
-    seen_hp: set[tuple[str, int]] = set()
-    group_meta = ""
-
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("#") and "://" not in line:
-            group_meta = line.lstrip("#").strip()
-            continue
-        meta = group_meta
-        part = line
-        if " | " in line and "://" in line:
-            part, extra = line.split(" | ", 1)
-            part = part.strip()
-            meta = f"{group_meta} {extra.strip()}".strip()
-        if part.startswith(("http://", "https://")):
-            sub_urls.append((part, meta))
-        else:
-            for u in extract_uris(part):
-                hp = extract_host_port(u)
-                if hp and hp not in seen_hp:
-                    seen_hp.add(hp)
-                    frag = unquote(u.split("#", 1)[1]) if "#" in u else ""
-                    candidates.append((u, f"{meta} {frag}".strip()))
-
-    def fetch_sub(item: tuple[str, str]) -> list[tuple[str, str]]:
-        url, m = item
-        out: list[tuple[str, str]] = []
-        try:
-            r = requests.get(url, timeout=8, headers={"User-Agent": "v2ray-checker/1.0"})
-            if r.ok:
-                for u in extract_uris(r.text):
-                    frag = unquote(u.split("#", 1)[1]) if "#" in u else ""
-                    out.append((u, f"{m} {frag}".strip()))
-        except Exception:
-            pass
-        return out
-
-    if sub_urls:
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            for fut in as_completed([pool.submit(fetch_sub, s) for s in sub_urls]):
-                for u, m in fut.result():
-                    hp = extract_host_port(u)
-                    if hp and hp not in seen_hp:
-                        seen_hp.add(hp)
-                        candidates.append((u, m))
-
-    log(f"Collected {len(candidates)} unique servers from {len(sub_urls)} subscriptions.")
-    return candidates[:MAX_CANDIDATES]
+    return ""
 
 
-def update_readme(count: int) -> None:
-    if not README_FILE.exists():
+def _save_clean_configs_json(
+    out_dir: Path,
+    working: list[tuple[str, dict]],
+    result: dict,
+    out: "((str) -> None)",
+    silent: bool = False,
+) -> None:
+    if not working:
         return
-    content = README_FILE.read_text(encoding="utf-8")
-    line = f"Рабочих серверов в подписке: **{count}**"
-    if re.search(r"Рабочих серверов в подписке:\s*\*\*\d+\*\*", content):
-        content = re.sub(r"Рабочих серверов в подписке:\s*\*\*\d+\*\*", line, content)
-    else:
-        content = content.rstrip() + f"\n\n{line}\n"
-    README_FILE.write_text(content, encoding="utf-8")
-
-
-def main() -> None:
-    xray_exe = find_xray()
-    if not xray_exe:
-        log("[ERROR] xray binary not found.")
-        sys.exit(1)
-
-    start_ts = time.time()
-    candidates = collect_sources()
-    port_pool = _make_port_pool()
-    working: list[tuple[str, str, float, float]] = []
-    stats: dict[str, int] = {}
-
-    def check_one(item: tuple[str, str]):
-        uri, meta = item
-        hp = extract_host_port(uri)
-        if not hp:
-            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_uri"
-        host, port = hp
-        outbound = uri_to_outbound(uri)
-        if not outbound:
-            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "bad_outbound"
-        if not tcp_reachable(host, port, timeout=TCP_TIMEOUT):
-            return False, uri, meta, 0.0, -1.0, ("🌍", "Европа"), "tcp_closed"
-        p = port_pool.get()
-        try:
-            ok, mbps, ms, reason = run_xray_and_test(xray_exe, outbound, p, timeout=TEST_TIMEOUT)
-            country = resolve_country(host) if ok else ("🌍", "Европа")
-            return ok, uri, meta, mbps, ms, country, reason
-        finally:
-            port_pool.put(p)
-
-    pool = ThreadPoolExecutor(max_workers=CONCURRENT_CHECKS)
     try:
-        futures = [pool.submit(check_one, c) for c in candidates]
-        for idx, fut in enumerate(as_completed(futures), start=1):
-            if time.time() - start_ts > MAX_RUNTIME_SECONDS:
-                log("Runtime limit reached, finishing...")
+        clean_json = out_dir / "clean_configs.json"
+        clean_txt = out_dir / "clean_links.txt"
+        clean_b64 = out_dir / "clean_subscription_base64.txt"
+        clean_json.write_text(
+            json.dumps([cfg for _, cfg in working], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result["clean_json_path"] = str(clean_json)
+        links_from_json: list[str] = []
+        for remark, full_cfg in working:
+            ob = get_proxy_outbound_from_config(full_cfg)
+            if ob:
+                link = _outbound_to_link(ob, remark)
+                if link:
+                    links_from_json.append(link)
+        if links_from_json:
+            clean_txt.write_text("\n".join(links_from_json), encoding="utf-8")
+            clean_b64.write_text(
+                base64.standard_b64encode("\n".join(links_from_json).encode("utf-8")).decode("ascii"),
+                encoding="utf-8",
+            )
+            result["clean_links_path"] = str(clean_txt)
+            result["clean_b64_path"] = str(clean_b64)
+        if not silent:
+            out(f"\n  Clean configs saved ({len(working)} working only):")
+            out(f"    - {clean_json}")
+            if links_from_json:
+                out(f"    - {clean_txt}")
+                out(f"    - {clean_b64}")
+    except OSError as e:
+        if not silent:
+            out(f"\n  [WARN] Could not save clean configs: {e}")
+
+
+def _save_clean_configs_link(
+    out_dir: Path,
+    working: list[tuple[str, str]],
+    result: dict,
+    out: "((str) -> None)",
+    silent: bool = False,
+) -> None:
+    if not working:
+        return
+    try:
+        links_only = [link for _, link in working]
+        clean_txt = out_dir / "clean_links.txt"
+        clean_b64 = out_dir / "clean_subscription_base64.txt"
+        clean_txt.write_text("\n".join(links_only), encoding="utf-8")
+        clean_b64.write_text(
+            base64.standard_b64encode("\n".join(links_only).encode("utf-8")).decode("ascii"),
+            encoding="utf-8",
+        )
+        result["clean_links_path"] = str(clean_txt)
+        result["clean_b64_path"] = str(clean_b64)
+        if not silent:
+            out(f"\n  Clean configs saved ({len(working)} working only):")
+            out(f"    - {clean_txt}")
+            out(f"    - {clean_b64}")
+    except OSError as e:
+        if not silent:
+            out(f"\n  [WARN] Could not save clean configs: {e}")
+
+
+def _make_port_pool() -> QueuePort[int]:
+    q: QueuePort[int] = QueuePort()
+    for i in range(PORT_POOL_SIZE):
+        q.put(SOCKS_PORT_MIN + i)
+    return q
+
+
+def run_check(
+    source: str,
+    log: "None | ((str) -> None)" = None,
+    cancel_check: "None | (() -> bool)" = None,
+    progress_callback: "None | ((int, int) -> None)" = None,
+    timeout: int = TEST_TIMEOUT,
+    concurrent: int = 1,
+    ping_limit: "int | None" = None,
+) -> dict:
+    """Run checker on a subscription URL, base64 string, single link, or JSON config list."""
+    def out(msg: str) -> None:
+        if log:
+            log(msg)
+        else:
+            print(msg)
+
+    result = {
+        "working": [],
+        "failed": [],
+        "skipped": [],
+        "clean_links_path": None,
+        "clean_b64_path": None,
+        "clean_json_path": None,
+        "error": None,
+        "cancelled": False,
+    }
+
+    out("=" * 60)
+    out("  V2Ray/Xray Config Checker")
+    out("=" * 60)
+
+    xray_path = find_xray()
+    if not xray_path:
+        result["error"] = "Xray not found. Install from https://github.com/XTLS/Xray-core/releases"
+        out("\n  [ERROR] Xray not found.")
+        return result
+    out(f"  Xray: {xray_path}\n")
+
+    source = (source or "").strip()
+    if not source:
+        result["error"] = "No subscription or link entered."
+        return result
+
+    if source.startswith(("http://", "https://")):
+        try:
+            req = Request(source, headers={"User-Agent": "v2ray-checker/1.0"})
+            with urlopen(req, timeout=20) as r:
+                raw = r.read()
+            source = raw.decode("utf-8", errors="replace")
+        except URLError as e:
+            result["error"] = f"Could not fetch URL: {e}"
+            out(f"  [ERROR] Could not fetch subscription URL: {e}")
+            return result
+
+    json_configs = parse_json_subscription(source)
+    if json_configs is not None:
+        working_json: list[tuple[str, dict]] = []
+        failed_json: list[tuple[str, str]] = []
+        skipped_json: list[tuple[str, str]] = []
+        seen_server_port: set[tuple[str, int]] = set()
+        out_dir = Path(__file__).resolve().parent
+        items_json: list[tuple[int, str, dict]] = []
+
+        for idx, (remark, full_config) in enumerate(json_configs):
+            ob = get_proxy_outbound_from_config(full_config)
+            if ob:
+                key = get_outbound_server_port(ob)
+                if key and key in seen_server_port:
+                    skipped_json.append((remark, "Duplicate (same server:port)"))
+                    out(f"  [SKIP] Duplicate (same server:port)  |  {remark}")
+                    continue
+                if key:
+                    seen_server_port.add(key)
+            items_json.append((idx, remark, full_config))
+
+        total_json = len(items_json)
+        concurrency_json = max(1, min(concurrent, 16))
+        limit_txt = f", ping <= {ping_limit} ms" if ping_limit is not None else ""
+        out(f"  Detected JSON subscription: {len(json_configs)} config(s). Testing {total_json} (timeout {timeout}s, parallel: {concurrency_json}{limit_txt})...\n")
+
+        port_pool = _make_port_pool()
+
+        def _test_one_json(item: tuple[int, str, dict]) -> tuple[int, str, bool, str, float, dict]:
+            idx, remark, full_config = item
+            port = port_pool.get()
+            try:
+                fd, path = tempfile.mkstemp(suffix=".json")
+                try:
+                    test_config = build_test_config_from_json(full_config, port)
+                    os.write(fd, json.dumps(test_config).encode("utf-8"))
+                    os.close(fd)
+                    fd = -1
+                    ok, result_str, ping_ms = run_xray_and_test(path, port, timeout=timeout)
+                    return (idx, remark, ok, result_str, ping_ms, full_config)
+                finally:
+                    if fd >= 0:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                return (idx, remark, False, str(e), -1.0, full_config)
+            finally:
+                port_pool.put(port)
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=concurrency_json) as executor:
+            futures = {executor.submit(_test_one_json, item): item for item in items_json}
+            for future in as_completed(futures):
+                if cancel_check and cancel_check():
+                    result["cancelled"] = True
+                    out("  [CANCELLED] Stopped by user.")
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    idx, remark, ok, result_str, ping_ms, full_config = future.result()
+                except Exception as e:
+                    item = futures[future]
+                    remark, full_config = item[1], item[2]
+                    ok, result_str, ping_ms = False, str(e), -1.0
+                ping_val = int(ping_ms) if ping_ms >= 0 else -1
+                over_limit = ping_limit is not None and ping_ms >= 0 and ping_ms > ping_limit
+                if ok and not over_limit:
+                    ob = get_proxy_outbound_from_config(full_config)
+                    key = get_outbound_server_port(ob) if ob else None
+                    host = key[0] if key else ""
+                    new_remark = format_qwils_remark(host, ping_ms, remark)
+                    working_json.append((new_remark, full_config))
+                    out(f"  [OK]  result: {result_str}  |  ping: {ping_val} ms  |  {new_remark}")
+                else:
+                    fail_reason = f"ping > {ping_limit} ms" if over_limit else result_str
+                    failed_json.append((remark, fail_reason))
+                    out(f"  [FAIL]  result: {fail_reason}  |  ping: {ping_val}  |  {remark}")
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total_json)
+                if completed % BATCH_SAVE_EVERY == 0 and working_json:
+                    _save_clean_configs_json(out_dir, working_json, result, out, silent=True)
+
+        if working_json:
+            _save_clean_configs_json(out_dir, working_json, result, out, silent=False)
+        result["working"] = [(r, "") for r, _ in working_json]
+        result["failed"] = failed_json
+        result["skipped"] = skipped_json
+        return result
+
+    links = decode_subscription(source)
+    if not links:
+        result["error"] = "No valid links found. Use subscription URL, base64, vmess/vless/trojan link, or JSON config array."
+        out("  No valid links found in subscription.")
+        return result
+
+    working: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+    seen_server_port: set[tuple[str, int]] = set()
+    out_dir = Path(__file__).resolve().parent
+    items_link: list[tuple[int, str, dict, str]] = []
+
+    for i, link in enumerate(links):
+        remark = get_remark(link) or f"Node-{i + 1}"
+        outbound = parse_link(link)
+        if not outbound:
+            skipped.append((remark, "Unsupported link type (only vmess/vless/trojan)"))
+            continue
+        key = get_outbound_server_port(outbound)
+        if key and key in seen_server_port:
+            skipped.append((remark, "Duplicate (same server:port)"))
+            out(f"  [SKIP] Duplicate (same server:port)  |  {remark}")
+            continue
+        if key:
+            seen_server_port.add(key)
+        items_link.append((i, remark, outbound, link))
+
+    total_to_test = len(items_link)
+    concurrency = max(1, min(concurrent, 16))
+    limit_txt = f", ping <= {ping_limit} ms" if ping_limit is not None else ""
+    out(f"  Found {len(links)} node(s). Testing {total_to_test} (timeout {timeout}s, parallel: {concurrency}{limit_txt})...\n")
+
+    port_pool = _make_port_pool()
+
+    def _test_one_link(item: tuple[int, str, dict, str]) -> tuple[int, str, dict, bool, str, float, str]:
+        idx, remark, outbound, link = item
+        port = port_pool.get()
+        try:
+            config = build_xray_config(outbound, port)
+            fd, path = tempfile.mkstemp(suffix=".json")
+            try:
+                os.write(fd, json.dumps(config).encode("utf-8"))
+                os.close(fd)
+                fd = -1
+                ok, result_str, ping_ms = run_xray_and_test(path, port, timeout=timeout)
+                return (idx, remark, outbound, ok, result_str, ping_ms, link)
+            finally:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        except Exception as e:
+            return (idx, remark, outbound, False, str(e), -1.0, link)
+        finally:
+            port_pool.put(port)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_test_one_link, item): item for item in items_link}
+        for future in as_completed(futures):
+            if cancel_check and cancel_check():
+                result["cancelled"] = True
+                out("  [CANCELLED] Stopped by user.")
                 for f in futures:
                     f.cancel()
                 break
             try:
-                ok, uri, meta, mbps, ms, country, reason = fut.result()
-            except Exception:
-                ok, uri, meta, mbps, ms, country, reason = False, "", "", 0.0, -1.0, ("🌍", "Европа"), "error"
-            stats[reason] = stats.get(reason, 0) + 1
-            if ok:
-                title = format_title(uri, meta, country, mbps, ms)
-                working.append((clean_uri(uri), title, mbps, ms))
-                log(f"[{idx}/{len(candidates)}] OK {mbps:.1f}Mbps / {ms:.0f}ms -> {title}")
+                idx, remark, outbound, ok, result_str, ping_ms, link = future.result()
+            except Exception as e:
+                item = futures[future]
+                remark, outbound, link = item[1], item[2], item[3]
+                ok, result_str, ping_ms = False, str(e), -1.0
+
+            ping_val = int(ping_ms) if ping_ms >= 0 else -1
+            over_limit = ping_limit is not None and ping_ms >= 0 and ping_ms > ping_limit
+            if ok and not over_limit:
+                key = get_outbound_server_port(outbound)
+                host = key[0] if key else ""
+                new_remark = format_qwils_remark(host, ping_ms, remark)
+                new_link = apply_remark_to_link(link, new_remark)
+                working.append((new_remark, new_link))
+                out(f"  [OK]  result: {result_str}  |  ping: {ping_val} ms  |  {new_remark}")
             else:
-                log(f"[{idx}/{len(candidates)}] FAIL ({reason})")
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+                fail_reason = f"ping > {ping_limit} ms" if over_limit else result_str
+                failed.append((remark, fail_reason))
+                out(f"  [FAIL]  result: {fail_reason}  |  ping: {ping_val}  |  {remark}")
 
-    log(f"Stats: {stats}")
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_to_test)
+            if completed % BATCH_SAVE_EVERY == 0 and working:
+                _save_clean_configs_link(out_dir, working, result, out, silent=True)
 
-    working.sort(key=lambda x: (-x[2], x[3]))
-    now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-    header = [
-        f"#profile-title: {BRAND_TAG}",
-        "#profile-update-interval: 2",
-        f"#announce: Обновлено: {now_str} | Серверов: {len(working)}",
-    ]
-    links: list[str] = []
-    for i, (base_uri, title, _, _) in enumerate(working):
-        final_title = f"{title} ⚡" if i == 0 else title
-        links.append(f"{base_uri}#{quote(final_title)}")
+    out("")
+    out("=" * 60)
+    out(f"  Working: {len(working)}  |  Failed: {len(failed)}  |  Skipped: {len(skipped)}")
+    if result["cancelled"]:
+        out("  (Stopped by user.)")
+    out("=" * 60)
 
-    SUB_FILE.write_text("\n".join(header + links) + "\n", encoding="utf-8")
-    update_readme(len(links))
-    log(f"Saved {len(links)} working servers to {SUB_FILE}.")
+    if working:
+        _save_clean_configs_link(out_dir, working, result, out, silent=False)
+
+    result["working"] = working
+    result["failed"] = failed
+    result["skipped"] = skipped
+    return result
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print("  Usage:")
+        print("    python v2ray_checker.py <subscription_url>")
+        print("    python v2ray_checker.py <base64_subscription_string>")
+        print("    python v2ray_checker.py vmess://... | vless://... | trojan://...")
+        sys.exit(0)
+    run_check(sys.argv[1])
 
 
 if __name__ == "__main__":
