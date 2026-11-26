@@ -32,8 +32,23 @@ jobs:
 
       - name: Install Xray
         run: |
-          bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-          xray -version
+          set -e
+          if sudo bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
+            xray -version
+          else
+            mkdir -p xray_bin
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              x86_64|amd64) ZIP_NAME="Xray-linux-64.zip" ;;
+              aarch64|arm64) ZIP_NAME="Xray-linux-arm64-v8a.zip" ;;
+              *) ZIP_NAME="Xray-linux-64.zip" ;;
+            esac
+            curl -L "https://github.com/XTLS/Xray-core/releases/latest/download/${ZIP_NAME}" -o xray.zip
+            unzip -q xray.zip -d xray_bin
+            chmod +x xray_bin/xray
+            echo "$PWD/xray_bin" >> "$GITHUB_PATH"
+            ./xray_bin/xray -version
+          fi
 
       - name: Restore blacklist cache
         uses: actions/cache@v4
@@ -48,10 +63,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
-          # Опционально: укажите прокси/шлюз с IP в РФ (например socks5h://user:pass@ru-ip:1080)
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
-          # URL для проверки доступности из РФ (по умолчанию эндпоинт в RU-сегменте)
-          RU_CHECK_URL: https://www.gosuslugi.ru/
+          # Минимальная скорость в Mbps для прохождения отбора (0 = брать любые рабочие)
+          MIN_SPEED_MBPS: "1.0"
+          # Тестовый URL для замера скорости и проверки доступности из РФ
+          SPEED_TEST_URL: "https://speed.cloudflare.com/__down?bytes=5000000"
         run: python checker.py
 
       - name: Commit and push working configs
@@ -60,6 +76,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update working configs (RU check)"
+            git commit -m "chore: update working configs with RU check and speed"
             git push
           fi
