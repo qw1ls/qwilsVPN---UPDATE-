@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import datetime
 import json
 import os
 import re
@@ -18,15 +19,18 @@ SOURCES_LIST_URL = os.getenv(
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
 )
 RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
-MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.0"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
 SPEED_TEST_URL = os.getenv(
-    "SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=5000000"
+    "SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=3000000"
 ).strip()
-WORKING_OUTPUT = "working_configs.txt"
-BLACKLIST_FILE = "blacklist_local.txt"
-MAX_WORKERS = 16
-TIMEOUT_SEC = 10
+SUBSCRIPTION_TITLE = "antiRKN FREE"
 
+WORKING_OUTPUT = "working_configs.txt"
+SUBSCRIPTION_OUTPUT = "subscription.txt"
+BLACKLIST_FILE = "blacklist_local.txt"
+
+MAX_WORKERS = 20
+TIMEOUT_SEC = 8
 SCHEME_PATTERN = re.compile(r"(?:vless|vmess|trojan|ss)://[^\s\"'<>]+", re.IGNORECASE)
 
 
@@ -34,20 +38,13 @@ def find_xray_binary() -> str:
     found = shutil.which("xray")
     if found:
         return found
-    local_bin = os.path.abspath("xray_bin/xray")
-    if os.path.exists(local_bin):
-        return local_bin
+    for candidate in ("/usr/local/bin/xray", os.path.abspath("xray_bin/xray")):
+        if os.path.exists(candidate):
+            return candidate
     return "xray"
 
 
 XRAY_BIN = find_xray_binary()
-
-
-def country_code_to_flag(code: str) -> str:
-    code = (code or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
-        return "🌐"
-    return "".join(chr(127397 + ord(ch)) for ch in code)
 
 
 def find_free_port() -> int:
@@ -97,7 +94,7 @@ def fetch_sources(sources_url: str) -> list[str]:
     all_links = set()
     for url in source_urls:
         try:
-            r = requests.get(url, timeout=15)
+            r = requests.get(url, timeout=12)
             if r.status_code == 200 and r.text:
                 for link in extract_links(r.text):
                     all_links.add(link)
@@ -247,22 +244,7 @@ def build_outbound(uri: str) -> Optional[dict]:
     return None
 
 
-def detect_geo_via_proxies(proxies: dict[str, str]) -> tuple[str, str]:
-    try:
-        r = requests.get("http://ip-api.com/json/?fields=status,country,countryCode", proxies=proxies, timeout=6)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("status") == "success":
-                code = data.get("countryCode", "")
-                name = data.get("country", "Unknown")
-                return country_code_to_flag(code), name
-    except Exception:
-        pass
-    return "🌐", "Unknown"
-
-
 def check_ru_reachability(proxies: dict[str, str]) -> bool:
-    # Если задан RU_EGRESS_PROXY — проверяем доступность через российский шлюз
     if RU_EGRESS_PROXY:
         ru_proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY}
         try:
@@ -272,7 +254,6 @@ def check_ru_reachability(proxies: dict[str, str]) -> bool:
         except requests.RequestException:
             return False
 
-    # Проверяем доступность через сам VPN-конфиг
     try:
         r = requests.get("https://www.gosuslugi.ru/", proxies=proxies, timeout=TIMEOUT_SEC)
         return r.status_code < 500
@@ -289,7 +270,7 @@ def measure_speed_mbps(proxies: dict[str, str]) -> float:
             if not chunk:
                 break
             total_bytes += len(chunk)
-            if time.monotonic() - start >= 4.0:
+            if time.monotonic() - start >= 3.0:
                 break
 
     elapsed = max(time.monotonic() - start, 0.001)
@@ -297,10 +278,12 @@ def measure_speed_mbps(proxies: dict[str, str]) -> float:
     return round(mbps, 1)
 
 
-def rename_config(uri: str, flag: str, country_name: str, speed_mbps: float) -> str:
-    label = f"{flag} {country_name} @qw1lsVPN [{speed_mbps:.1f} Mbps]"
-    encoded_label = urllib.parse.quote(label)
+def format_server_label(speed_mbps: float, updated_at: str) -> str:
+    return f"| последнее обновление {updated_at} | {speed_mbps:.1f} Mbps | @qw1lsVPN"
 
+
+def rename_config(uri: str, label: str) -> str:
+    encoded_label = urllib.parse.quote(label)
     if uri.lower().startswith("vmess://"):
         b64_part = uri[8:].split("#", 1)[0]
         decoded = decode_base64_smart(b64_part)
@@ -308,7 +291,9 @@ def rename_config(uri: str, flag: str, country_name: str, speed_mbps: float) -> 
             try:
                 cfg = json.loads(decoded)
                 cfg["ps"] = label
-                new_b64 = base64.b64encode(json.dumps(cfg, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+                new_b64 = base64.b64encode(
+                    json.dumps(cfg, ensure_ascii=False).encode("utf-8")
+                ).decode("utf-8")
                 return f"vmess://{new_b64}"
             except Exception:
                 pass
@@ -317,10 +302,10 @@ def rename_config(uri: str, flag: str, country_name: str, speed_mbps: float) -> 
     return f"{base_uri}#{encoded_label}"
 
 
-def test_single_link(uri: str) -> tuple[str, Optional[str]]:
+def test_single_link(uri: str, updated_at: str) -> tuple[str, float, Optional[str]]:
     outbound = build_outbound(uri)
     if not outbound:
-        return uri, None
+        return uri, 0.0, None
 
     local_port = find_free_port()
     xray_config = {
@@ -348,23 +333,23 @@ def test_single_link(uri: str) -> tuple[str, Optional[str]]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(0.35)
+        time.sleep(0.25)
 
         socks_url = f"socks5h://127.0.0.1:{local_port}"
         proxies = {"http": socks_url, "https": socks_url}
 
         if not check_ru_reachability(proxies):
-            return uri, None
+            return uri, 0.0, None
 
         speed_mbps = measure_speed_mbps(proxies)
         if speed_mbps < MIN_SPEED_MBPS:
-            return uri, None
+            return uri, speed_mbps, None
 
-        flag, country_name = detect_geo_via_proxies(proxies)
-        renamed_uri = rename_config(uri, flag, country_name, speed_mbps)
-        return uri, renamed_uri
+        label = format_server_label(speed_mbps, updated_at)
+        renamed_uri = rename_config(uri, label)
+        return uri, speed_mbps, renamed_uri
     except Exception:
-        return uri, None
+        return uri, 0.0, None
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -387,29 +372,46 @@ def load_blacklist(path: str) -> set[str]:
 
 
 def main() -> None:
+    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
     blacklist = load_blacklist(BLACKLIST_FILE)
     candidates = [u for u in fetch_sources(SOURCES_LIST_URL) if u not in blacklist]
 
-    working: list[str] = []
+    results: list[tuple[float, str]] = []
     failed: list[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for raw_uri, renamed_uri in executor.map(test_single_link, candidates):
+        futures = [executor.submit(test_single_link, uri, updated_at) for uri in candidates]
+        for fut in concurrent.futures.as_completed(futures):
+            raw_uri, speed_mbps, renamed_uri = fut.result()
             if renamed_uri:
-                working.append(renamed_uri)
+                results.append((speed_mbps, renamed_uri))
             else:
                 failed.append(raw_uri)
 
+    # Сортируем по убыванию скорости: самые быстрые серверы сверху
+    results.sort(key=lambda item: item[0], reverse=True)
+    sorted_configs = [item[1] for item in results]
+
     with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
-        for item in working:
-            f.write(item + "\n")
+        f.write(f"# profile-title: {SUBSCRIPTION_TITLE}\n")
+        for cfg in sorted_configs:
+            f.write(cfg + "\n")
+
+    raw_sub_text = "\n".join([f"# profile-title: {SUBSCRIPTION_TITLE}"] + sorted_configs)
+    b64_sub = base64.b64encode(raw_sub_text.encode("utf-8")).decode("utf-8")
+    with open(SUBSCRIPTION_OUTPUT, "w", encoding="utf-8") as f:
+        f.write(b64_sub + "\n")
 
     updated_blacklist = sorted(blacklist.union(failed))
     with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
         for item in updated_blacklist:
             f.write(item + "\n")
 
-    print(f"Checked: {len(candidates)} | Working: {len(working)} | Failed: {len(failed)}")
+    top_speed = results[0][0] if results else 0.0
+    print(
+        f"Subscription: {SUBSCRIPTION_TITLE} | Checked: {len(candidates)} | "
+        f"Working: {len(sorted_configs)} | Top speed: {top_speed:.1f} Mbps | Failed: {len(failed)}"
+    )
 
 
 if __name__ == "__main__":
