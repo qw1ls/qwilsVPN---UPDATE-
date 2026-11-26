@@ -1,4 +1,4 @@
-name: lol
+name: кекккке
 
 on:
   schedule:
@@ -50,8 +50,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
-          MIN_SPEED_MBPS: "0.5"
-          SPEED_TEST_URL: "https://speed.cloudflare.com/__down?bytes=3000000"
+          RU_CHECK_URL: "https://www.gstatic.com/generate_204"
+          SPEED_TEST_URL: "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt"
+          MIN_SPEED_MBPS: "0.2"
+          MAX_CANDIDATES: "300"
         run: python checker.py
 
       - name: Commit and push working configs
