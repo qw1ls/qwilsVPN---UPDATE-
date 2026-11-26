@@ -1,4 +1,4 @@
-name: Update VPN configs
+name: lol
 
 on:
   schedule:
@@ -33,22 +33,8 @@ jobs:
       - name: Install Xray
         run: |
           set -e
-          if sudo bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
-            xray -version
-          else
-            mkdir -p xray_bin
-            ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64|amd64) ZIP_NAME="Xray-linux-64.zip" ;;
-              aarch64|arm64) ZIP_NAME="Xray-linux-arm64-v8a.zip" ;;
-              *) ZIP_NAME="Xray-linux-64.zip" ;;
-            esac
-            curl -L "https://github.com/XTLS/Xray-core/releases/latest/download/${ZIP_NAME}" -o xray.zip
-            unzip -q xray.zip -d xray_bin
-            chmod +x xray_bin/xray
-            echo "$PWD/xray_bin" >> "$GITHUB_PATH"
-            ./xray_bin/xray -version
-          fi
+          sudo bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+          xray -version
 
       - name: Restore blacklist cache
         uses: actions/cache@v4
@@ -64,10 +50,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
-          # Минимальная скорость в Mbps для прохождения отбора (0 = брать любые рабочие)
-          MIN_SPEED_MBPS: "1.0"
-          # Тестовый URL для замера скорости и проверки доступности из РФ
-          SPEED_TEST_URL: "https://speed.cloudflare.com/__down?bytes=5000000"
+          MIN_SPEED_MBPS: "0.5"
+          SPEED_TEST_URL: "https://speed.cloudflare.com/__down?bytes=3000000"
         run: python checker.py
 
       - name: Commit and push working configs
@@ -76,6 +60,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update working configs with RU check and speed"
+            git commit -m "chore: update antiRKN FREE configs"
             git push
           fi
