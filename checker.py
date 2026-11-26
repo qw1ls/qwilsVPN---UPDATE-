@@ -21,17 +21,24 @@ SOURCES_LIST_URL = os.getenv(
 RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
 MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
 SPEED_TEST_URL = os.getenv(
-    "SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=3000000"
+    "SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=2000000"
 ).strip()
+RU_CHECK_URL = os.getenv("RU_CHECK_URL", "https://www.gosuslugi.ru/").strip()
 SUBSCRIPTION_TITLE = "antiRKN FREE"
 
 WORKING_OUTPUT = "working_configs.txt"
 SUBSCRIPTION_OUTPUT = "subscription.txt"
 BLACKLIST_FILE = "blacklist_local.txt"
 
-MAX_WORKERS = 20
-TIMEOUT_SEC = 8
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "24"))
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "300"))
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "300"))
+TIMEOUT_SEC = 5
 SCHEME_PATTERN = re.compile(r"(?:vless|vmess|trojan|ss)://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def find_xray_binary() -> str:
@@ -83,22 +90,28 @@ def extract_links(content: str) -> list[str]:
 
 
 def fetch_sources(sources_url: str) -> list[str]:
-    resp = requests.get(sources_url, timeout=15)
+    log(f"Downloading sources list: {sources_url}")
+    resp = requests.get(sources_url, timeout=10)
     resp.raise_for_status()
     source_urls = [
         line.strip()
         for line in resp.text.splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
+    log(f"Found {len(source_urls)} subscription URLs")
 
     all_links = set()
-    for url in source_urls:
+    for idx, url in enumerate(source_urls, start=1):
         try:
-            r = requests.get(url, timeout=12)
+            r = requests.get(url, timeout=8)
             if r.status_code == 200 and r.text:
-                for link in extract_links(r.text):
-                    all_links.add(link)
-        except requests.RequestException:
+                found = extract_links(r.text)
+                all_links.update(found)
+                log(f"Source [{idx}/{len(source_urls)}] OK: +{len(found)} links (total unique: {len(all_links)})")
+            else:
+                log(f"Source [{idx}/{len(source_urls)}] status {r.status_code}")
+        except requests.RequestException as e:
+            log(f"Source [{idx}/{len(source_urls)}] error: {type(e).__name__}")
             continue
 
     return sorted(all_links)
@@ -248,14 +261,14 @@ def check_ru_reachability(proxies: dict[str, str]) -> bool:
     if RU_EGRESS_PROXY:
         ru_proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY}
         try:
-            r = requests.get("https://www.gosuslugi.ru/", proxies=ru_proxies, timeout=TIMEOUT_SEC)
+            r = requests.get(RU_CHECK_URL, proxies=ru_proxies, timeout=TIMEOUT_SEC)
             if r.status_code >= 500:
                 return False
         except requests.RequestException:
             return False
 
     try:
-        r = requests.get("https://www.gosuslugi.ru/", proxies=proxies, timeout=TIMEOUT_SEC)
+        r = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_SEC)
         return r.status_code < 500
     except requests.RequestException:
         return False
@@ -270,7 +283,7 @@ def measure_speed_mbps(proxies: dict[str, str]) -> float:
             if not chunk:
                 break
             total_bytes += len(chunk)
-            if time.monotonic() - start >= 3.0:
+            if time.monotonic() - start >= 2.0:
                 break
 
     elapsed = max(time.monotonic() - start, 0.001)
@@ -333,7 +346,7 @@ def test_single_link(uri: str, updated_at: str) -> tuple[str, float, Optional[st
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(0.25)
+        time.sleep(0.2)
 
         socks_url = f"socks5h://127.0.0.1:{local_port}"
         proxies = {"http": socks_url, "https": socks_url}
@@ -354,7 +367,7 @@ def test_single_link(uri: str, updated_at: str) -> tuple[str, float, Optional[st
         if proc and proc.poll() is None:
             proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 proc.kill()
         if tmp_path and os.path.exists(tmp_path):
@@ -372,23 +385,43 @@ def load_blacklist(path: str) -> set[str]:
 
 
 def main() -> None:
+    started_at = time.monotonic()
     updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
     blacklist = load_blacklist(BLACKLIST_FILE)
-    candidates = [u for u in fetch_sources(SOURCES_LIST_URL) if u not in blacklist]
+    log(f"Loaded blacklist entries: {len(blacklist)}")
+
+    all_links = fetch_sources(SOURCES_LIST_URL)
+    candidates = [u for u in all_links if u not in blacklist][:MAX_CANDIDATES]
+    log(f"Candidates to test: {len(candidates)} (max={MAX_CANDIDATES})")
 
     results: list[tuple[float, str]] = []
     failed: list[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(test_single_link, uri, updated_at) for uri in candidates]
-        for fut in concurrent.futures.as_completed(futures):
-            raw_uri, speed_mbps, renamed_uri = fut.result()
+        future_to_uri = {
+            executor.submit(test_single_link, uri, updated_at): uri for uri in candidates
+        }
+        done_count = 0
+        for fut in concurrent.futures.as_completed(future_to_uri):
+            done_count += 1
+            fallback_uri = future_to_uri[fut]
+            try:
+                raw_uri, speed_mbps, renamed_uri = fut.result(timeout=TIMEOUT_SEC + 3)
+            except Exception:
+                raw_uri, speed_mbps, renamed_uri = fallback_uri, 0.0, None
+
             if renamed_uri:
                 results.append((speed_mbps, renamed_uri))
             else:
                 failed.append(raw_uri)
 
-    # Сортируем по убыванию скорости: самые быстрые серверы сверху
+            if done_count % 25 == 0 or done_count == len(candidates):
+                log(f"Progress: {done_count}/{len(candidates)} | Working so far: {len(results)}")
+
+            if time.monotonic() - started_at > MAX_RUN_SECONDS:
+                log(f"Reached time limit ({MAX_RUN_SECONDS}s), stopping early cleanly")
+                break
+
     results.sort(key=lambda item: item[0], reverse=True)
     sorted_configs = [item[1] for item in results]
 
@@ -408,8 +441,8 @@ def main() -> None:
             f.write(item + "\n")
 
     top_speed = results[0][0] if results else 0.0
-    print(
-        f"Subscription: {SUBSCRIPTION_TITLE} | Checked: {len(candidates)} | "
+    log(
+        f"Done in {time.monotonic() - started_at:.1f}s | Subscription: {SUBSCRIPTION_TITLE} | "
         f"Working: {len(sorted_configs)} | Top speed: {top_speed:.1f} Mbps | Failed: {len(failed)}"
     )
 
