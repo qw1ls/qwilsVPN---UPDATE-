@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -17,13 +18,36 @@ SOURCES_LIST_URL = os.getenv(
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
 )
 RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
-RU_CHECK_URL = os.getenv("RU_CHECK_URL", "https://www.gosuslugi.ru/").strip()
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.0"))
+SPEED_TEST_URL = os.getenv(
+    "SPEED_TEST_URL", "https://speed.cloudflare.com/__down?bytes=5000000"
+).strip()
 WORKING_OUTPUT = "working_configs.txt"
 BLACKLIST_FILE = "blacklist_local.txt"
 MAX_WORKERS = 16
-TIMEOUT_SEC = 8
+TIMEOUT_SEC = 10
 
 SCHEME_PATTERN = re.compile(r"(?:vless|vmess|trojan|ss)://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def find_xray_binary() -> str:
+    found = shutil.which("xray")
+    if found:
+        return found
+    local_bin = os.path.abspath("xray_bin/xray")
+    if os.path.exists(local_bin):
+        return local_bin
+    return "xray"
+
+
+XRAY_BIN = find_xray_binary()
+
+
+def country_code_to_flag(code: str) -> str:
+    code = (code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "🌐"
+    return "".join(chr(127397 + ord(ch)) for ch in code)
 
 
 def find_free_port() -> int:
@@ -223,21 +247,80 @@ def build_outbound(uri: str) -> Optional[dict]:
     return None
 
 
-def check_via_ru_proxy(test_url: str) -> bool:
-    if not RU_EGRESS_PROXY:
-        return True
-    proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY}
+def detect_geo_via_proxies(proxies: dict[str, str]) -> tuple[str, str]:
     try:
-        r = requests.get(test_url, proxies=proxies, timeout=TIMEOUT_SEC)
+        r = requests.get("http://ip-api.com/json/?fields=status,country,countryCode", proxies=proxies, timeout=6)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "success":
+                code = data.get("countryCode", "")
+                name = data.get("country", "Unknown")
+                return country_code_to_flag(code), name
+    except Exception:
+        pass
+    return "🌐", "Unknown"
+
+
+def check_ru_reachability(proxies: dict[str, str]) -> bool:
+    # Если задан RU_EGRESS_PROXY — проверяем доступность через российский шлюз
+    if RU_EGRESS_PROXY:
+        ru_proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY}
+        try:
+            r = requests.get("https://www.gosuslugi.ru/", proxies=ru_proxies, timeout=TIMEOUT_SEC)
+            if r.status_code >= 500:
+                return False
+        except requests.RequestException:
+            return False
+
+    # Проверяем доступность через сам VPN-конфиг
+    try:
+        r = requests.get("https://www.gosuslugi.ru/", proxies=proxies, timeout=TIMEOUT_SEC)
         return r.status_code < 500
     except requests.RequestException:
         return False
 
 
-def test_single_link(uri: str) -> tuple[str, bool]:
+def measure_speed_mbps(proxies: dict[str, str]) -> float:
+    start = time.monotonic()
+    total_bytes = 0
+    with requests.get(SPEED_TEST_URL, proxies=proxies, stream=True, timeout=TIMEOUT_SEC) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_content(chunk_size=65536):
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if time.monotonic() - start >= 4.0:
+                break
+
+    elapsed = max(time.monotonic() - start, 0.001)
+    mbps = (total_bytes * 8) / (elapsed * 1_000_000)
+    return round(mbps, 1)
+
+
+def rename_config(uri: str, flag: str, country_name: str, speed_mbps: float) -> str:
+    label = f"{flag} {country_name} @qw1lsVPN [{speed_mbps:.1f} Mbps]"
+    encoded_label = urllib.parse.quote(label)
+
+    if uri.lower().startswith("vmess://"):
+        b64_part = uri[8:].split("#", 1)[0]
+        decoded = decode_base64_smart(b64_part)
+        if decoded:
+            try:
+                cfg = json.loads(decoded)
+                cfg["ps"] = label
+                new_b64 = base64.b64encode(json.dumps(cfg, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+                return f"vmess://{new_b64}"
+            except Exception:
+                pass
+
+    base_uri = uri.split("#", 1)[0]
+    return f"{base_uri}#{encoded_label}"
+
+
+def test_single_link(uri: str) -> tuple[str, Optional[str]]:
     outbound = build_outbound(uri)
     if not outbound:
-        return uri, False
+        return uri, None
 
     local_port = find_free_port()
     xray_config = {
@@ -261,7 +344,7 @@ def test_single_link(uri: str) -> tuple[str, bool]:
             tmp_path = tf.name
 
         proc = subprocess.Popen(
-            ["xray", "run", "-c", tmp_path],
+            [XRAY_BIN, "run", "-c", tmp_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -270,17 +353,18 @@ def test_single_link(uri: str) -> tuple[str, bool]:
         socks_url = f"socks5h://127.0.0.1:{local_port}"
         proxies = {"http": socks_url, "https": socks_url}
 
-        # Проверка доступности целевого ресурса из РФ через проверяемый сервер
-        resp = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_SEC)
-        ok = resp.status_code < 500
+        if not check_ru_reachability(proxies):
+            return uri, None
 
-        # Дополнительно проверяем доступность через внешний RU-шлюз, если задан
-        if ok and RU_EGRESS_PROXY:
-            ok = check_via_ru_proxy(RU_CHECK_URL)
+        speed_mbps = measure_speed_mbps(proxies)
+        if speed_mbps < MIN_SPEED_MBPS:
+            return uri, None
 
-        return uri, ok
+        flag, country_name = detect_geo_via_proxies(proxies)
+        renamed_uri = rename_config(uri, flag, country_name, speed_mbps)
+        return uri, renamed_uri
     except Exception:
-        return uri, False
+        return uri, None
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -310,11 +394,11 @@ def main() -> None:
     failed: list[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for uri, is_ok in executor.map(test_single_link, candidates):
-            if is_ok:
-                working.append(uri)
+        for raw_uri, renamed_uri in executor.map(test_single_link, candidates):
+            if renamed_uri:
+                working.append(renamed_uri)
             else:
-                failed.append(uri)
+                failed.append(raw_uri)
 
     with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
         for item in working:
