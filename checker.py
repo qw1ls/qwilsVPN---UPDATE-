@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import base64
-import concurrent.futures
 import datetime
 import json
 import os
@@ -21,13 +20,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# --- Настройки и переменные окружения ---
 SOURCES_LIST_URL = os.getenv(
     "SOURCES_LIST_URL",
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
 )
+RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
+RU_CHECK_URL = os.getenv("RU_CHECK_URL", "").strip()
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 BRANCH = os.getenv("BRANCH", "main").strip()
+
 WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
 SUBSCRIPTION_OUTPUT = os.getenv("SUBSCRIPTION_FILE", "subscription.txt").strip()
 BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
@@ -37,16 +41,17 @@ TAG_HANDLE = "@qw1lsVPN"
 BLACKLIST_AGE_LIMIT = 5 * 3600
 
 TIMEOUT_PER_URL = int(os.getenv("TIMEOUT_PER_URL", "7"))
-MAX_TCP_PING_MS = int(os.getenv("MAX_TCP_PING_MS", "900"))
+MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "600"))
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
-SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "8"))
-MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
+SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "7"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.0"))
+MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
 MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "2"))
 
-PING_WORKERS = int(os.getenv("PING_WORKERS", "30"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
+PING_WORKERS = int(os.getenv("PING_WORKERS", "35"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "6"))
-SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "3"))
+SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "8"))
 XRAY_STARTUP_TIMEOUT = 2.5
 
 TEST_URLS = [
@@ -57,18 +62,19 @@ TEST_URLS = [
 ]
 SPEEDTEST_URLS = [
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
+    "https://speed.cloudflare.com/__down?bytes=5000000",
 ]
 BLOCKED_COUNTRIES = {"JP", "VN", "AF", "IR", "TM", "CN", "KR"}
 
-blacklist_dict = {}
+blacklist_dict: dict[tuple[str, int], int] = {}
 blacklist_lock = Lock()
-country_cache = {}
-dns_cache = {}
+country_cache: dict[str, tuple[str, str]] = {}
+dns_cache: dict[str, Optional[str]] = {}
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0", "Connection": "close"})
 _retry = Retry(total=2, backoff_factor=0.4, status_forcelist=[429, 500, 502, 503])
-_adapter = HTTPAdapter(max_retries=_retry, pool_connections=20, pool_maxsize=20)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=25, pool_maxsize=25)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
@@ -97,7 +103,7 @@ def resolve_host(host: str) -> Optional[str]:
 
 
 def country_code_to_flag(code: str) -> str:
-    if not code or len(code) != 2:
+    if not code or len(code) != 2 or not code.isalpha():
         return "🌐"
     c = code.upper()
     return chr(ord(c[0]) + 0x1F1A5) + chr(ord(c[1]) + 0x1F1A5)
@@ -159,6 +165,7 @@ def prefetch_countries_batch(hosts: list[str]) -> None:
         list(ex.map(get_country, unique_hosts))
 
 
+# --- Чёрный список ---
 def load_blacklist() -> None:
     global blacklist_dict
     blacklist_dict = {}
@@ -210,21 +217,23 @@ def add_to_blacklist_local(host: str, port: int) -> None:
 
 
 def save_blacklist() -> None:
+    now = int(time.time())
     with blacklist_lock:
-        snapshot = dict(blacklist_dict)
+        snapshot = {k: ts for k, ts in blacklist_dict.items() if now - ts <= BLACKLIST_AGE_LIMIT}
     try:
         with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
-            for (h, p), ts in snapshot.items():
+            for (h, p), ts in sorted(snapshot.items()):
                 f.write(f"{h}:{p}:{ts}\n")
     except OSError:
         pass
 
 
+# --- Парсинг конфигов (vless / vmess / trojan) ---
 def clean_config_line(line: str) -> str:
-    return line.split("#")[0].strip()
+    return re.split(r"[#\s]", line.strip(), maxsplit=1)[0].strip()
 
 
-def extract_host_port(line: str):
+def extract_host_port(line: str) -> Optional[tuple[str, int]]:
     cleaned = clean_config_line(line)
     if not cleaned or len(cleaned) > 8192:
         return None
@@ -397,6 +406,7 @@ def _line_to_outbound(line: str, tag: str = "test") -> Optional[dict]:
     return None
 
 
+# --- Сеть и Xray ---
 def tcp_ping(host: str, port: int) -> Optional[float]:
     try:
         start = time.perf_counter()
@@ -508,9 +518,20 @@ def test_single_config(line: str):
             return None
 
         proxies = {
-            "http": f"socks5://127.0.0.1:{socks_port}",
-            "https": f"socks5://127.0.0.1:{socks_port}",
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
         }
+
+        if RU_CHECK_URL:
+            try:
+                r_ru = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_PER_URL)
+                if r_ru.status_code >= 500:
+                    add_to_blacklist_local(host, port)
+                    return None
+            except requests.RequestException:
+                add_to_blacklist_local(host, port)
+                return None
+
         success = 0
         for url in TEST_URLS:
             try:
@@ -543,38 +564,47 @@ def measure_speed_multi(line: str) -> float:
         if not wait_for_port(socks_port):
             return 0.0
         proxies = {
-            "http": f"socks5://127.0.0.1:{socks_port}",
-            "https": f"socks5://127.0.0.1:{socks_port}",
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
         }
-        speeds = []
+        run_speeds: list[float] = []
         for url in SPEEDTEST_URLS:
             try:
-                with requests.get(url, proxies=proxies, timeout=6, stream=True) as r:
+                with requests.get(url, proxies=proxies, timeout=SPEEDTEST_TIMEOUT, stream=True) as r:
                     if r.status_code != 200:
                         continue
                     downloaded = 0
                     start = time.perf_counter()
-                    for chunk in r.iter_content(chunk_size=4096):
-                        if chunk:
-                            downloaded += len(chunk)
-                            elapsed = time.perf_counter() - start
-                            if elapsed > 0 and downloaded > 0:
-                                speeds.append((downloaded / (1024 * 1024) * 8.0) / elapsed)
-                            if elapsed > SPEEDTEST_TIMEOUT:
-                                break
+                    for chunk in r.iter_content(chunk_size=32768):
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        elapsed = time.perf_counter() - start
+                        if elapsed >= SPEEDTEST_TIMEOUT or downloaded >= 4 * 1024 * 1024:
+                            break
+                    elapsed = time.perf_counter() - start
+                    if downloaded >= 65536 and elapsed >= 0.25:
+                        mbps = (downloaded * 8.0) / (elapsed * 1_000_000.0)
+                        if 0.0 < mbps <= MAX_SANE_SPEED_MBPS:
+                            run_speeds.append(mbps)
             except requests.RequestException:
                 continue
-        return round(statistics.median(speeds), 1) if speeds else 0.0
+
+        if not run_speeds:
+            return 0.0
+        return round(statistics.median(run_speeds), 1)
     except Exception:
         return 0.0
     finally:
         _stop_xray(proc, cfg)
 
 
+# --- Загрузка источников ---
 def fetch_configs_from_source(url: str) -> list[str]:
     text = ""
+    proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY} if RU_EGRESS_PROXY else None
     try:
-        with _session.get(url, timeout=(5, 10), stream=True) as r:
+        with _session.get(url, timeout=(5, 10), stream=True, proxies=proxies) as r:
             if r.status_code == 200:
                 content, downloaded, start_time = [], 0, time.time()
                 for chunk in r.iter_content(chunk_size=65536):
@@ -637,11 +667,11 @@ def fetch_all_configs_dedup() -> list[str]:
                 cfgs = future.result()
             except Exception:
                 cfgs = []
-            log(f"{src} -> {len(cfgs)} конфигов (vless/vmess/trojan)")
+            log(f"{src} -> {len(cfgs)} конфигов")
             all_cfgs.extend(cfgs)
 
     log(f"Собрано {len(all_cfgs)} сырых конфигов. Удаляем дубликаты...")
-    unique = {}
+    unique: dict[tuple[str, int], str] = {}
     for cfg in all_cfgs:
         hp = extract_host_port(cfg)
         if hp and hp not in unique:
@@ -728,28 +758,32 @@ def main() -> None:
                 log(f"  xray-тест: {i}/{len(alive)}, рабочих: {len(working)}")
 
     log(f"Рабочих по Xray: {len(working)} из {total}")
+    save_blacklist()
+
     if not working:
-        save_blacklist()
         log("Рабочих серверов не найдено.")
         return
 
     log(f"Замер скорости ({len(working)} серверов, {SPEEDTEST_WORKERS} потоков)...")
-    speeds = []
+    speeds: list[tuple[str, float]] = []
     with ThreadPoolExecutor(max_workers=SPEEDTEST_WORKERS) as ex:
         futures = {ex.submit(measure_speed_multi, line): line for line in working}
+        done_spd = 0
         for future in as_completed(futures):
+            done_spd += 1
             line = futures[future]
             try:
                 spd = future.result()
             except Exception:
                 spd = 0.0
             speeds.append((line, spd))
+            if done_spd % 50 == 0 or done_spd == len(working):
+                log(f"  скорость: {done_spd}/{len(working)}")
 
     hosts = [hp[0] for line, _ in speeds if (hp := extract_host_port(line))]
     prefetch_countries_batch(hosts)
 
-    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
-    ranked = []
+    ranked: list[tuple[float, str]] = []
     for line, spd in speeds:
         if spd < MIN_SPEED_MBPS:
             continue
@@ -758,11 +792,10 @@ def main() -> None:
         if country_code in BLOCKED_COUNTRIES:
             continue
         flag = country_code_to_flag(country_code)
-        label = f"{flag} {country_name} | последнее обновление {updated_at} | {spd:.1f} Mbps | {TAG_HANDLE}"
+        label = f"{flag} {country_name} | {spd:.1f} Mbps | {TAG_HANDLE}"
         renamed = rename_config_with_label(line, label)
         ranked.append((spd, renamed))
 
-    # От самой высокой скорости к меньшей
     ranked.sort(key=lambda x: x[0], reverse=True)
     final_configs = [item[1] for item in ranked]
 
@@ -778,11 +811,9 @@ def main() -> None:
 
         upload_to_github_with_retry(plain_text, WORKING_OUTPUT)
         upload_to_github_with_retry(b64_sub, SUBSCRIPTION_OUTPUT)
-        log(f"Сохранено серверов: {len(final_configs)} | Топ скорость: {ranked[0][0]:.1f} Mbps")
+        log(f"Готово! Сохранено серверов: {len(final_configs)} | Топ скорость: {ranked[0][0]:.1f} Mbps")
     else:
         log(f"Ни один сервер не прошёл порог скорости >= {MIN_SPEED_MBPS} Mbps.")
-
-    save_blacklist()
 
 
 if __name__ == "__main__":
