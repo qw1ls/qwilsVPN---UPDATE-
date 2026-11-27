@@ -1,4 +1,4 @@
-name: кекккке
+name: Update VPN configs
 
 on:
   schedule:
@@ -50,18 +50,18 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
-          RU_CHECK_URL: "https://www.gstatic.com/generate_204"
-          SPEED_TEST_URL: "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt"
-          MIN_SPEED_MBPS: "0.2"
-          MAX_CANDIDATES: "300"
+          MAX_TCP_PING_MS: "600"
+          MIN_SPEED_MBPS: "1.0"
+          SPEEDTEST_WORKERS: "8"
         run: python checker.py
 
-      - name: Commit and push working configs
+      - name: Commit and push blacklist
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -f blacklist_local.txt || true
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update antiRKN FREE configs"
+            git commit -m "chore: update blacklist_local.txt"
+            git pull --rebase origin "${{ github.ref_name }}"
             git push
           fi
