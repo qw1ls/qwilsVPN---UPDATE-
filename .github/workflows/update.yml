@@ -1,107 +1,104 @@
-name: Auto Key Checker
+name: Update VPN configs
 
 on:
   schedule:
-    - cron: '0 */4 * * *'          # каждые 4 часа (в 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
-  workflow_dispatch:               # ручной запуск
+    # Запуск каждые 50 минут в течение суток (00:00, 00:50, 01:40, 02:30 ...)
+    - cron: "0 0 * * *"
+    - cron: "50 0 * * *"
+    - cron: "40 1 * * *"
+    - cron: "30 2 * * *"
+    - cron: "20 3 * * *"
+    - cron: "10 4 * * *"
+    - cron: "0 5 * * *"
+    - cron: "50 5 * * *"
+    - cron: "40 6 * * *"
+    - cron: "30 7 * * *"
+    - cron: "20 8 * * *"
+    - cron: "10 9 * * *"
+    - cron: "0 10 * * *"
+    - cron: "50 10 * * *"
+    - cron: "40 11 * * *"
+    - cron: "30 12 * * *"
+    - cron: "20 13 * * *"
+    - cron: "10 14 * * *"
+    - cron: "0 15 * * *"
+    - cron: "50 15 * * *"
+    - cron: "40 16 * * *"
+    - cron: "30 17 * * *"
+    - cron: "20 18 * * *"
+    - cron: "10 19 * * *"
+    - cron: "0 20 * * *"
+    - cron: "50 20 * * *"
+    - cron: "40 21 * * *"
+    - cron: "30 22 * * *"
+    - cron: "20 23 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
-  actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: vpn-update
   cancel-in-progress: true
 
 jobs:
-  check-keys:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: "3.12"
 
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
-
-      - name: Download Xray
+      - name: Install dependencies
         run: |
-          curl -L "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o xray.zip
-          unzip -o xray.zip
-          chmod +x xray
+          python -m pip install --upgrade pip
+          pip install "requests[socks]"
 
-      - name: Download sing-box (optional, для hy2/tuic)
-        continue-on-error: true
+      - name: Install Xray
         run: |
-          SB_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-            | grep -oP '"tag_name": *"v\K[^"]+')
-          echo "sing-box version: $SB_VER"
-          curl -L "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-amd64.tar.gz" -o sb.tar.gz
-          tar -xzf sb.tar.gz
-          cp sing-box-*/sing-box ./sing-box
-          chmod +x ./sing-box
-          ./sing-box version || true
+          set -e
+          sudo bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+          xray -version
 
-      - name: Run Checker
-        run: python main.py
-        timeout-minutes: 220
+      - name: Restore blacklist cache
+        uses: actions/cache@v4
+        with:
+          path: blacklist_local.txt
+          key: vpn-state-${{ github.run_id }}-${{ hashFiles('blacklist_local.txt') }}
+          restore-keys: |
+            vpn-state-
+
+      - name: Run checker
         env:
-          PYTHONUNBUFFERED: 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
+          RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
+          MAX_TCP_PING_MS: "500"
+          TIMEOUT_PER_URL: "4"
+          TLS_CHECK_TIMEOUT: "4"
+          SPEEDTEST_TIMEOUT: "4"
+          MIN_SPEED_MBPS: "1.0"
+          PING_WORKERS: "60"
+          MAX_WORKERS: "20"
+          THIRD_CHECK_WORKERS: "20"
+          SPEEDTEST_WORKERS: "16"
+          MAX_CANDIDATES: "1200"
+          MAX_RUN_SECONDS: "900"
+        run: python checker.py
 
-      - name: White/Black stats
-        if: always()
+      - name: Commit and push working configs
         run: |
-          for f in checked/RU_Best/ru_white_all_WHITE.txt checked/RU_Best/ru_white_all_BLACK.txt \
-                   checked/My_Euro/my_euro_all_WHITE.txt checked/My_Euro/my_euro_all_BLACK.txt; do
-            if [ -f "$f" ]; then echo "$f: $(grep -c . "$f" || true) строк"; fi
-          done
-          echo "unverified (RU ALL): $(grep -h -c '\[unverified\]' checked/RU_Best/ru_white_all_part*.txt 2>/dev/null | paste -sd+ | bc 2>/dev/null || echo n/a)"
-          echo "unsupported_proto: $(grep -h -c '\[unsupported_proto\]' checked/RU_Best/ru_white_all_part*.txt 2>/dev/null | paste -sd+ | bc 2>/dev/null || echo n/a)"
-
-      - name: Remove null bytes from checked files
-        run: |
-          find checked/ -name "*.txt" -exec sed -i 's/\x00//g' {} \;
-          find checked/ -name "*.json" -exec sed -i 's/\x00//g' {} \; || true
-
-      - name: Commit & Push
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-
-          # Добавляем все изменённые файлы (игнорируем ошибки, если файлов нет)
-          git add checked/subscriptions_list.txt || true
-          git add checked/**/*.txt || true
-          git add checked/**/*.json || true
-
-          # Проверяем, есть ли изменения для коммита
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f working_configs.txt subscription.txt blacklist_local.txt || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update antiRKN FREE configs"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push
           fi
-
-          # Создаём коммит
-          git commit -m "🤖 Auto-update checked keys [${{ github.run_id }}]"
-
-          # Синхронизируемся с удалённой веткой: забираем последние изменения
-          # и перебазируем наш коммит поверх них.
-          # --autostash сохраняет незакоммиченные изменения, если они есть,
-          # а -X ours автоматически разрешает конфликты в пользу наших файлов.
-          git pull --rebase --autostash -X ours origin main || {
-            echo "Rebase failed, aborting and using force push as fallback"
-            git rebase --abort
-            git push --force origin main
-            exit 0
-          }
-
-          # Безопасный push (проверяет, что удалённая ветка не изменилась с момента последнего pull)
-          git push --force-with-lease origin main
