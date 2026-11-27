@@ -1,1463 +1,909 @@
 #!/usr/bin/env python3
-import os
-import re
-import socket
-import ssl
-import time
-import json
-import requests
 import base64
-import websocket
-import shutil
-import threading
+import datetime
+import json
+import os
+import random
+import re
+import signal
+import socket
+import statistics
+import subprocess
+import tempfile
+import time
 import urllib.parse
-from datetime import datetime, timezone
-from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
+from threading import Lock
+from typing import Optional
 
-from white_checker import batch_white_check, reason_summary, singbox_available, xray_available
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# ------------------ Настройки ------------------
-BASE_DIR = "checked"
-FOLDER_RU = os.path.join(BASE_DIR, "RU_Best")
-FOLDER_EURO = os.path.join(BASE_DIR, "My_Euro")
+SOURCES_LIST_URL = os.getenv(
+    "SOURCES_LIST_URL",
+    "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
+)
+RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
+RU_CHECK_URL = os.getenv("RU_CHECK_URL", "").strip()
+EGRESS_TRACE_URL = os.getenv("EGRESS_TRACE_URL", "https://cloudflare.com/cdn-cgi/trace").strip()
+TLS_PROBE_HOST = os.getenv("TLS_PROBE_HOST", "www.cloudflare.com").strip()
 
-if os.path.exists(FOLDER_RU):
-    shutil.rmtree(FOLDER_RU)
-if os.path.exists(FOLDER_EURO):
-    shutil.rmtree(FOLDER_EURO)
-os.makedirs(FOLDER_RU, exist_ok=True)
-os.makedirs(FOLDER_EURO, exist_ok=True)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+BRANCH = os.getenv("BRANCH", "main").strip()
 
-TIMEOUT = 5
-socket.setdefaulttimeout(TIMEOUT)
-THREADS = 40
+WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
+SUBSCRIPTION_OUTPUT = os.getenv("SUBSCRIPTION_FILE", "subscription.txt").strip()
+BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
 
-CACHE_HOURS = 6
-CHUNK_LIMIT = 1000
-EURO_CHUNK_LIMIT = 500
-MAX_KEYS_TO_CHECK = 100000  # УВЕЛИЧЕНО
+PANEL_TITLE = "antiRKN FREE"
+TAG_HANDLE = "@qw1lsVPN"
+BLACKLIST_AGE_LIMIT = 5 * 3600
 
-MAX_PING_MS = 10000
-FAST_LIMIT = 3000
-MAX_HISTORY_AGE = 2 * 24 * 3600
+TIMEOUT_PER_URL = int(os.getenv("TIMEOUT_PER_URL", "4"))
+TLS_CHECK_TIMEOUT = float(os.getenv("TLS_CHECK_TIMEOUT", "4"))
+MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "500"))
+TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
+SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "4"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.0"))
+MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
+MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "2"))
 
-# Дисковый кэш IP → страна
-IP_CACHE_FILE = os.path.join(BASE_DIR, "ip_cache.json")
-IP_CACHE_MAX_AGE_DAYS = 30
+PING_WORKERS = int(os.getenv("PING_WORKERS", "60"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "20"))
+THIRD_CHECK_WORKERS = int(os.getenv("THIRD_CHECK_WORKERS", "20"))
+FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "8"))
+SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "16"))
+XRAY_STARTUP_TIMEOUT = 2.0
 
-# ip-api: не более ~40 req/min — берём 38 для запаса
-GEO_API_RATE_LIMIT = 38
-GEO_API_WINDOW = 60.0
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "1200"))
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "900"))
 
-RU_FILES = ["ru_white_part1.txt", "ru_white_part2.txt", "ru_white_part3.txt", "ru_white_part4.txt"]
-EURO_FILES = ["my_euro_part1.txt", "my_euro_part2.txt", "my_euro_part3.txt"]
-
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-MY_CHANNEL = "@vlesstrojan"
-
-# ==================== ОБНОВЛЁННЫЙ СПИСОК URLS_RU ====================
-URLS_RU = [
-    # старые источники (сохраняем все, что были)
-  https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt
-https://gist.githubusercontent.com/guidongone/cce77f5be24a53992b45038c3fc2b852/raw/cc7a5285d22a30257c5314364f043cbbaadb108f/%25E5%25B0%258F%25E9%259D%2592%25E7%25A7%2591%25E5%25AD%25A6%25E7%25BD%2591V2ray%25E5%2585%258D%25E8%25B4%25B9%25E8%258A%2582%25E7%2582%25B9260531.txt
-https://raw.githubusercontent.com/pog7x/vpn-configs/refs/heads/master/githubmirror/1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/26.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/27.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/28.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/30.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/31.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/32.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/33.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/34.txt
-https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/8.txt
-https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
-https://internet-tenshi.kangel.xyz/1
-https://gist.githubusercontent.com/sevushyamamoto-stack/17bd65436db9cccddc55ef376e70cd7a/raw/fe6f77c72aa75b7364e5d2bdc008ef22b4cb16e9/gistfile1.txt
-https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
-https://raw.githubusercontent.com/ewecrow78-gif/whitelist1/main/list.txt
-https://raw.githubusercontent.com/btsk161/Freeinternet_byMygalaru.github.io/refs/heads/main/premium.txt
-https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat
-https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/main/subscriptions/FreeCFGHub1.txt
-https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_WHITE.txt
-https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta7.txt
-https://raw.githubusercontent.com/HalyavusVPNUS/halyava-vpn-mini/refs/heads/main/mini.txt
-https://raw.githubusercontent.com/v0id9/vpn-configs/refs/heads/main/vpn.txt
-https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/non_ru.txt
-https://gist.githubusercontent.com/rerererere395/250704ddbcc30f383bfe7cc0e2f29ba8/raw/8991efca05d31299b948e50103b1b1d0d310f2d9/gistfile1.txt
-https://raw.githubusercontent.com/Diversan313/apex-parser/refs/heads/main/subs/main/alive_full.txt
-https://raw.githubusercontent.com/WSJuJuBA01/WS_Parser/refs/heads/main/subscription.txt
-https://gist.githubusercontent.com/SlavaKat/2d75a18830db8315ee79d58f5ee62e30/raw/
-https://raw.githubusercontent.com/flaafix/AetrisVPN-white-list-lite/refs/heads/main/AetrisVPN.txt
-https://raw.githubusercontent.com/svinakraft-maker/FlareFeed/refs/heads/main/public/podpiska.txt
-https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-https://gitverse.ru/api/repos/Pizduk/PizdukVPN/raw/branch/master/WlSubPiz.txt
-https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt
-https://gidroksi.fun/black-list
-https://gidroksi.fun/white-list
-https://raw.githubusercontent.com/WSJuJuB01/WSVPN/refs/heads/main/sub.txt
-    # ---------- НОВЫЕ ИСТОЧНИКИ (добавлены 09.07.2026) ----------
-   https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
-https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt
-https://gist.githubusercontent.com/guidongone/cce77f5be24a53992b45038c3fc2b852/raw/cc7a5285d22a30257c5314364f043cbbaadb108f/%25E5%25B0%258F%25E9%259D%2592%25E7%25A7%2591%25E5%25AD%25A6%25E7%25BD%2591V2ray%25E5%2585%258D%25E8%25B4%25B9%25E8%258A%2582%25E7%2582%25B9260531.txt
-https://raw.githubusercontent.com/pog7x/vpn-configs/refs/heads/master/githubmirror/1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/26.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/27.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/28.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/30.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/31.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/32.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/33.1.txt
-https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/34.txt
-https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/8.txt
-https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
-https://internet-tenshi.kangel.xyz/1
-https://gist.githubusercontent.com/sevushyamamoto-stack/17bd65436db9cccddc55ef376e70cd7a/raw/fe6f77c72aa75b7364e5d2bdc008ef22b4cb16e9/gistfile1.txt
-https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
-https://raw.githubusercontent.com/ewecrow78-gif/whitelist1/main/list.txt
-https://raw.githubusercontent.com/btsk161/Freeinternet_byMygalaru.github.io/refs/heads/main/premium.txt
-https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat
-https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/main/subscriptions/FreeCFGHub1.txt
-https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_WHITE.txt
-https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta7.txt
-https://raw.githubusercontent.com/HalyavusVPNUS/halyava-vpn-mini/refs/heads/main/mini.txt
-https://raw.githubusercontent.com/v0id9/vpn-configs/refs/heads/main/vpn.txt
-https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/non_ru.txt
-https://gist.githubusercontent.com/rerererere395/250704ddbcc30f383bfe7cc0e2f29ba8/raw/8991efca05d31299b948e50103b1b1d0d310f2d9/gistfile1.txt
-https://raw.githubusercontent.com/Diversan313/apex-parser/refs/heads/main/subs/main/alive_full.txt
-https://raw.githubusercontent.com/WSJuJuBA01/WS_Parser/refs/heads/main/subscription.txt
-https://gist.githubusercontent.com/SlavaKat/2d75a18830db8315ee79d58f5ee62e30/raw/
-https://raw.githubusercontent.com/flaafix/AetrisVPN-white-list-lite/refs/heads/main/AetrisVPN.txt
-https://raw.githubusercontent.com/svinakraft-maker/FlareFeed/refs/heads/main/public/podpiska.txt
-https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
-https://gitverse.ru/api/repos/Pizduk/PizdukVPN/raw/branch/master/WlSubPiz.txt
-https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt
-https://gidroksi.fun/black-list
-https://gidroksi.fun/white-list
-https://raw.githubusercontent.com/WSJuJuB01/WSVPN/refs/heads/main/sub.txt
+TEST_URLS = [
+    "https://www.gstatic.com/generate_204",
+    "https://telegram.org",
+    "https://www.instagram.com",
+    "https://tiktok.com",
 ]
-
-# ==================== КОМБИНИРОВАННЫЙ URLS_MY (старые + clean) ====================
-URLS_MY = [
-    # ---------- СТАРЫЕ ИСТОЧНИКИ (ДАВАЛИ ЕВРОПУ 18.07) ----------
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/subscriptions/all_base64.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/subscriptions/all.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/subscriptions/sni_filtered_base64.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/main/archive/my_sources/generated/vless.txt",
-
-    # ---------- НОВЫЕ CLEAN-ФАЙЛЫ ----------
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/clean/vless.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/clean/hy2.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/clean/hysteria2.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/clean/ss.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/clean/trojan.txt",
-
-    # ---------- ОПЦИОНАЛЬНО: all_new.txt и cf_fresh.txt ----------
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/new/all_new.txt",
-    "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/refs/heads/main/data/githubmirror/new/cf_fresh.txt",
+SPEEDTEST_URLS = [
+    "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
+    "https://speed.cloudflare.com/__down?bytes=5000000",
 ]
+BLOCKED_COUNTRIES = {"JP", "VN", "AF", "IR", "TM", "CN", "KR"}
 
-EURO_CODES = {
-    "NL", "DE", "FI", "GB", "FR", "SE", "PL", "CZ", "AT", "CH",
-    "IT", "ES", "NO", "DK", "BE", "IE", "LU", "EE", "LV", "LT"
-}
-BAD_MARKERS = ["CN", "IR", "KR", "BR", "IN", "RELAY", "POOL", "🇨🇳", "🇮🇷", "🇰🇷"]
-# разделённые списки маркеров для is_garbage_text
-BAD_WORD_MARKERS = [
-    "🇨🇳", "🇮🇷", "🇰🇷", "🇧🇷", "🇮🇳",
-    "CHINA", "IRAN", "KOREA", "BRAZIL", "INDIA",
-    "RELAY", "POOL",
-]
-BAD_CODE_MARKERS = ["CN", "IR", "KR", "BR"]  # 'IN' убран: ловит английское 'in-' в подписях
+blacklist_dict: dict[tuple[str, int], int] = {}
+blacklist_lock = Lock()
+country_cache: dict[str, tuple[str, str]] = {}
+dns_cache: dict[str, Optional[str]] = {}
 
-RU_MARKERS_STRICT = [
-    ".ru", "moscow", "msk", "spb", "saint-peter", "russia",
-    "россия", "москва", "питер", "ru-", "-ru.",
-    "178.154.", "77.88.", "5.255.", "87.250.",
-    "95.108.", "213.180.", "195.208.",
-    "91.108.", "149.154.",
-]
+_session = requests.Session()
+_session.headers.update({"User-Agent": "Mozilla/5.0", "Connection": "close"})
+_retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503])
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=30, pool_maxsize=30)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
 
-# ------------------ Страна → название + флаг ------------------
 
-COUNTRY_NAMES_RU = {
-    "RU": "Россия", "NL": "Нидерланды", "DE": "Германия", "FI": "Финляндия",
-    "GB": "Великобритания", "FR": "Франция", "SE": "Швеция", "PL": "Польша",
-    "CZ": "Чехия", "AT": "Австрия", "CH": "Швейцария", "IT": "Италия",
-    "ES": "Испания", "NO": "Норвегия", "DK": "Дания", "BE": "Бельгия",
-    "IE": "Ирландия", "LU": "Люксембург", "EE": "Эстония", "LV": "Латвия",
-    "LT": "Литва",
-}
+def log(msg: str) -> None:
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-COUNTRY_FLAGS = {
-    "RU": "🇷🇺", "NL": "🇳🇱", "DE": "🇩🇪", "FI": "🇫🇮", "GB": "🇬🇧",
-    "FR": "🇫🇷", "SE": "🇸🇪", "PL": "🇵🇱", "CZ": "🇨🇿", "AT": "🇦🇹",
-    "CH": "🇨🇭", "IT": "🇮🇹", "ES": "🇪🇸", "NO": "🇳🇴", "DK": "🇩🇰",
-    "BE": "🇧🇪", "IE": "🇮🇪", "LU": "🇱🇺", "EE": "🇪🇪", "LV": "🇱🇻",
-    "LT": "🇱🇹",
-}
 
-def country_to_title_ru(code: str) -> str:
-    return COUNTRY_NAMES_RU.get(code, code or "UNKNOWN")
+def time_left(started_at: float) -> bool:
+    return (time.monotonic() - started_at) < MAX_RUN_SECONDS
 
-def country_to_flag(code: str) -> str:
-    return COUNTRY_FLAGS.get(code, "")
 
-# ---------- FIX UNIVERSAL (исправляет type=xhttp -> http) ----------
-def fix_universal(key: str) -> str:
-    key = key.strip()
-    if not key.startswith("vless://") or "type=xhttp" not in key:
-        return key
+def resolve_host(host: str) -> Optional[str]:
+    if not host:
+        return None
     try:
-        parsed = urllib.parse.urlparse(key)
-        query = urllib.parse.parse_qs(parsed.query)
-        if query.get("type", [""])[0].lower() == "xhttp":
-            query["type"] = ["http"]
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        return urllib.parse.urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                new_query,
-                parsed.fragment,
-            )
-        )
-    except Exception:
-        return key
-
-# ==================== GEO-API + КЭШИ ====================
-
-_disk_ip_cache: dict = {}
-
-def load_ip_cache():
-    global _disk_ip_cache
-    if os.path.exists(IP_CACHE_FILE):
-        try:
-            with open(IP_CACHE_FILE, "r", encoding="utf-8") as f:
-                _disk_ip_cache = json.load(f)
-        except Exception:
-            _disk_ip_cache = {}
-    cutoff = time.time() - IP_CACHE_MAX_AGE_DAYS * 86400
-    _disk_ip_cache = {k: v for k, v in _disk_ip_cache.items() if v.get("time", 0) > cutoff}
-
-def save_ip_cache():
-    os.makedirs(BASE_DIR, exist_ok=True)
-    try:
-        with open(IP_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_disk_ip_cache, f, ensure_ascii=False, indent=2)
-    except Exception:
+        socket.inet_aton(host)
+        return host
+    except OSError:
         pass
-
-_ip_cache_lock = threading.Lock()
-
-_host_to_ip: dict = {}
-_host_ip_lock = threading.Lock()
-
-def resolve_host(host: str) -> str | None:
-    with _host_ip_lock:
-        if host in _host_to_ip:
-            return _host_to_ip[host]
+    if host in dns_cache:
+        return dns_cache[host]
     try:
         ip = socket.gethostbyname(host)
-        with _host_ip_lock:
-            _host_to_ip[host] = ip
+        dns_cache[host] = ip
         return ip
-    except Exception:
-        with _host_ip_lock:
-            _host_to_ip[host] = None
-        return None
-
-_geo_rate_lock = threading.Lock()
-_geo_request_times: list = []
-_ip_api_disabled = False
-_geo_stats = defaultdict(int)
-_geo_stats_lock = threading.Lock()
-
-def _inc_geo_stat(key: str):
-    with _geo_stats_lock:
-        _geo_stats[key] += 1
-
-def _geo_api_wait_slot() -> bool:
-    global _ip_api_disabled
-    if _ip_api_disabled:
-        return False
-    with _geo_rate_lock:
-        now = time.time()
-        cutoff = now - GEO_API_WINDOW
-        while _geo_request_times and _geo_request_times[0] < cutoff:
-            _geo_request_times.pop(0)
-        if len(_geo_request_times) >= GEO_API_RATE_LIMIT:
-            sleep_time = GEO_API_WINDOW - (now - _geo_request_times[0]) + 0.1
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            now = time.time()
-            cutoff = now - GEO_API_WINDOW
-            while _geo_request_times and _geo_request_times[0] < cutoff:
-                _geo_request_times.pop(0)
-        _geo_request_times.append(time.time())
-    return True
-
-def detect_exit_country_via_http(proxy_host: str) -> str:
-    global _ip_api_disabled
-    ip = resolve_host(proxy_host)
-    if not ip:
-        return "UNKNOWN"
-    with _ip_cache_lock:
-        cached = _disk_ip_cache.get(ip)
-    if cached:
-        _inc_geo_stat("cache")
-        return cached["country"]
-    if _ip_api_disabled:
-        return "UNKNOWN"
-    if not _geo_api_wait_slot():
-        return "UNKNOWN"
-    try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=countryCode", timeout=4)
-        if r.status_code == 429:
-            _ip_api_disabled = True
-            print("⚠️  ip-api вернул 429 (rate limit) — geo-API отключён до конца запуска")
-            return "UNKNOWN"
-        if r.status_code == 200:
-            code = r.json().get("countryCode", "UNKNOWN") or "UNKNOWN"
-            with _ip_cache_lock:
-                _disk_ip_cache[ip] = {"country": code, "time": time.time()}
-            _inc_geo_stat("api")
-            return code
-    except Exception:
-        pass
-    return "UNKNOWN"
-
-def get_country_fast(host: str, key_name: str) -> str:
-    try:
-        host_l = host.lower()
-        name_u = key_name.upper()
-        if host_l.endswith(".ru"):
-            return "RU"
-        if host_l.endswith(".de"):
-            return "DE"
-        if host_l.endswith(".nl"):
-            return "NL"
-        if host_l.endswith(".uk") or host_l.endswith(".co.uk"):
-            return "GB"
-        if host_l.endswith(".fr"):
-            return "FR"
-        for code in EURO_CODES:
-            if code in name_u:
-                return code
-    except Exception:
-        pass
-    return "UNKNOWN"
-
-def _has_many_ru_markers(host: str, key_str: str) -> bool:
-    count = 0
-    host_lower = host.lower()
-    key_upper = key_str.upper()
-    for marker in RU_MARKERS_STRICT:
-        if marker.lower() in host_lower or marker.upper() in key_upper:
-            count += 1
-            if count >= 2:
-                return True
-    return False
-
-def is_russian_exit(key_str: str, host: str, country: str) -> bool:
-    if country == "RU":
-        return True
-    host_lower = host.lower()
-    if host_lower.endswith(".ru"):
-        return True
-    for marker in RU_MARKERS_STRICT:
-        if marker.lower() in host_lower:
-            return True
-    return False
-
-def is_garbage_text(key_str: str) -> bool:
-    """Мусор определяем ТОЛЬКО по комментарию (#...), не по хосту.
-
-    Хост может быть рабочим, а в подписи стоять 🇨🇳/IR_/CN_ — такие ключи и
-    надо выбрасывать. Двухбуквенные коды ищем как отдельный токен, иначе
-    «FINLAND»/«BERLIN» ловятся на подстроку IN.
-    """
-    comment = key_str.split("#", 1)[1] if "#" in key_str else ""
-    upper = comment.upper()
-    for marker in BAD_WORD_MARKERS:
-        if marker in upper:
-            return True
-    for code in BAD_CODE_MARKERS:
-        if re.search(rf"(?<![A-Z]){code}(?![A-Z])", upper):
-            return True
-    return False
-
-def fetch_keys(urls, tag):
-    out = []
-    print(f"Загрузка {tag}...")
-    for url in urls:
-        try:
-            if "github.com" in url and "/blob/" in url:
-                url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-            r = requests.get(url, timeout=10)
-            if r.status_code != 200:
-                continue
-            content = r.text.strip()
-            if "://" not in content:
-                try:
-                    lines = base64.b64decode(content + "==").decode("utf-8", errors="ignore").splitlines()
-                except Exception:
-                    lines = content.splitlines()
-            else:
-                lines = content.splitlines()
-            for l in lines:
-                l = l.strip()
-                if len(l) > 2000:
-                    continue
-                # ДОБАВЛЕНЫ ПРОТОКОЛЫ hy2:// и hysteria2://
-                if l.startswith(("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://", "tuic://")):
-                    # фильтр мусора для MY — только по комментарию
-                    if tag == "MY" and is_garbage_text(l):
-                        continue
-                    out.append((fix_universal(l), tag))
-        except Exception:
-            pass
-    return out
-
-ERR_TIMEOUT = "timeout"
-ERR_TLS = "tls"
-ERR_DNS = "dns"
-ERR_OTHER = "other"
-
-_err_stats = defaultdict(int)
-_err_stats_lock = threading.Lock()
-
-def _inc_err(kind: str):
-    with _err_stats_lock:
-        _err_stats[kind] += 1
-
-def check_single_key(data):
-    key, tag = data
-    try:
-        if "@" not in key or ":" not in key:
-            return None, None, None, None, key, ERR_OTHER
-        part = key.split("@")[1].split("?")[0].split("#")[0]
-        host_port = part.split(":")
-        host = host_port[0]
-        port = int(host_port[1])
-    except Exception:
-        return None, None, None, None, key, ERR_OTHER
-
-    if tag == "MY":
-        fast_hint = get_country_fast(host, key)
-        if fast_hint == "RU" and _has_many_ru_markers(host, key):
-            return None, None, None, None, key, ERR_OTHER
-
-    is_tls = (
-        "security=tls" in key or
-        "security=reality" in key or
-        "trojan://" in key or
-        "vmess://" in key
-    )
-    is_ws = "type=ws" in key or "net=ws" in key
-    path = "/"
-    match = re.search(r"path=([^&]+)", key)
-    if match:
-        path = unquote(match.group(1))
-
-    start = time.time()
-
-    try:
-        if is_ws:
-            protocol = "wss" if is_tls else "ws"
-            ws_url = f"{protocol}://{host}:{port}{path}"
-            ws = websocket.create_connection(
-                ws_url,
-                timeout=TIMEOUT,
-                sslopt={"cert_reqs": ssl.CERT_NONE},
-            )
-            ws.close()
-        elif is_tls:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            with socket.create_connection((host, port), timeout=TIMEOUT) as sock:
-                with context.wrap_socket(sock, server_hostname=host):
-                    pass
-        else:
-            with socket.create_connection((host, port), timeout=TIMEOUT):
-                pass
-    except socket.timeout:
-        _inc_err(ERR_TIMEOUT)
-        return None, None, None, None, key, ERR_TIMEOUT
-    except ssl.SSLError:
-        _inc_err(ERR_TLS)
-        return None, None, None, None, key, ERR_TLS
     except socket.gaierror:
-        _inc_err(ERR_DNS)
-        return None, None, None, None, key, ERR_DNS
-    except OSError as e:
-        msg = str(e).lower()
-        if "timed out" in msg or "timeout" in msg:
-            _inc_err(ERR_TIMEOUT)
-            return None, None, None, None, key, ERR_TIMEOUT
-        _inc_err(ERR_OTHER)
-        return None, None, None, None, key, ERR_OTHER
-    except Exception:
-        _inc_err(ERR_OTHER)
-        return None, None, None, None, key, ERR_OTHER
-
-    latency = int((time.time() - start) * 1000)
-    country_exit = detect_exit_country_via_http(host)
-
-    if country_exit == "UNKNOWN":
-        country_exit = get_country_fast(host, key)
-        if country_exit == "UNKNOWN":
-            _inc_geo_stat("unknown")
-        else:
-            _inc_geo_stat("fast")
-
-    return latency, tag, country_exit, host, key, None
-
-def make_final_key(k_id, latency, country):
-    title_ru = country_to_title_ru(country)
-    flag = country_to_flag(country)
-    title_full = f"{title_ru} {country}" if country and country != "UNKNOWN" else title_ru
-    info_str = f"[{latency}ms {title_full} {flag} {MY_CHANNEL}]"
-    raw = f"{k_id}#{info_str}"
-    return raw
-
-def extract_ping(key_str):
-    try:
-        label = key_str.split("#")[-1]
-        match = re.search(r"(\d+)ms", label)
-        if match:
-            return int(match.group(1))
-        return None
-    except Exception:
+        dns_cache[host] = None
         return None
 
-def save_exact(keys, folder, filename):
-    path = os.path.join(folder, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        cleaned = [k.strip() for k in keys if k and k.strip()]
-        f.write("\n".join(cleaned))
-    return path
 
-def save_fixed_chunks_ru(keys_list, folder):
-    valid_keys = [k.strip() for k in keys_list if k and k.strip()]
-    chunks = [
-        valid_keys[i:i + CHUNK_LIMIT]
-        for i in range(0, min(len(valid_keys), CHUNK_LIMIT * 4), CHUNK_LIMIT)
+def country_code_to_flag(code: str) -> str:
+    if not code or len(code) != 2 or not code.isalpha():
+        return "🌐"
+    c = code.upper()
+    return chr(ord(c[0]) + 0x1F1A5) + chr(ord(c[1]) + 0x1F1A5)
+
+
+def _parse_ipapi_com(d: dict):
+    if d.get("status") == "success":
+        return d.get("country", "Unknown"), d.get("countryCode", "").upper()
+    return None
+
+
+def _parse_ipwho_is(d: dict):
+    if d.get("country_code"):
+        return d.get("country", "Unknown"), d.get("country_code", "").upper()
+    return None
+
+
+def _parse_freeipapi(d: dict):
+    if d.get("countryCode"):
+        return d.get("countryName", "Unknown"), d.get("countryCode", "").upper()
+    return None
+
+
+def get_country(host: str) -> tuple[str, str]:
+    ip = resolve_host(host) or host
+    if not ip:
+        return "Unknown", ""
+    if ip in country_cache:
+        return country_cache[ip]
+
+    providers = [
+        (f"http://ip-api.com/json/{ip}?fields=status,country,countryCode", _parse_ipapi_com),
+        (f"https://ipwho.is/{ip}", _parse_ipwho_is),
+        (f"https://freeipapi.com/api/json/{ip}", _parse_freeipapi),
     ]
-    while len(chunks) < 4:
-        chunks.append([])
-    file_names = []
-    for i, filename in enumerate(RU_FILES):
-        save_exact(chunks[i] if i < len(chunks) else [], folder, filename)
-        count = len(chunks[i]) if i < len(chunks) else 0
-        print(f"  {filename}: {count} ключей")
-        file_names.append(filename)
-    return file_names
-
-def save_fixed_chunks_euro(keys_list, folder):
-    valid_keys = [k.strip() for k in keys_list if k and k.strip()]
-    chunks = [
-        valid_keys[i:i + EURO_CHUNK_LIMIT]
-        for i in range(0, min(len(valid_keys), EURO_CHUNK_LIMIT * 3), EURO_CHUNK_LIMIT)
-    ]
-    while len(chunks) < 3:
-        chunks.append([])
-    file_names = []
-    for i, filename in enumerate(EURO_FILES):
-        save_exact(chunks[i] if i < len(chunks) else [], folder, filename)
-        count = len(chunks[i]) if i < len(chunks) else 0
-        print(f"  {filename}: {count} ключей")
-        file_names.append(filename)
-    return file_names
-
-def save_chunked(keys_list, folder, base_name, chunk_size=None):
-    if chunk_size is None:
-        chunk_size = CHUNK_LIMIT
-    valid_keys = [k.strip() for k in keys_list if k and k.strip()]
-    chunks = [valid_keys[i:i + chunk_size] for i in range(0, len(valid_keys), chunk_size)]
-    file_names = []
-    for idx, chunk in enumerate(chunks, start=1):
-        filename = f"{base_name}_part{idx}.txt"
-        save_exact(chunk, folder, filename)
-        file_names.append(filename)
-        print(f"  {filename}: {len(chunk)} ключей")
-    return file_names
-
-def load_json(path):
-    if os.path.exists(path):
+    random.shuffle(providers)
+    for url, parser in providers:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            r = requests.get(url, timeout=2.5)
+            if r.status_code == 200:
+                res = parser(r.json())
+                if res and res[1]:
+                    country_cache[ip] = res
+                    return res
         except Exception:
-            pass
-    return {}
+            continue
 
-def save_json(path, data):
+    res = ("Unknown", "")
+    country_cache[ip] = res
+    return res
+
+
+def prefetch_countries_batch(hosts: list[str]) -> None:
+    unique_hosts = list({h for h in hosts if h})
+    if not unique_hosts:
+        return
+    log(f"Определение локаций ({len(unique_hosts)} серверов)...")
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        list(ex.map(get_country, unique_hosts))
+
+
+def load_blacklist() -> None:
+    global blacklist_dict
+    blacklist_dict = {}
+    if not os.path.exists(BLACKLIST_FILE):
+        return
+    now = int(time.time())
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.rsplit(":", 2)
+                if len(parts) != 3:
+                    continue
+                h, p, ts = parts
+                try:
+                    p_int, ts_int = int(p), int(ts)
+                except ValueError:
+                    continue
+                if now - ts_int <= BLACKLIST_AGE_LIMIT:
+                    blacklist_dict[(h, p_int)] = ts_int
+    except OSError:
+        pass
+
+
+def is_blacklisted(host: str, port: int) -> bool:
+    with blacklist_lock:
+        ts = blacklist_dict.get((host, port))
+        if ts is None:
+            return False
+        if int(time.time()) - ts > BLACKLIST_AGE_LIMIT:
+            del blacklist_dict[(host, port)]
+            return False
+        return True
+
+
+def add_to_blacklist_local(host: str, port: int) -> None:
+    key = (host, port)
+    with blacklist_lock:
+        if key in blacklist_dict:
+            return
+        blacklist_dict[key] = int(time.time())
+    try:
+        with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{host}:{port}:{int(time.time())}\n")
+    except OSError:
+        pass
+
+
+def save_blacklist() -> None:
+    now = int(time.time())
+    with blacklist_lock:
+        snapshot = {k: ts for k, ts in blacklist_dict.items() if now - ts <= BLACKLIST_AGE_LIMIT}
+    try:
+        with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            for (h, p), ts in sorted(snapshot.items()):
+                f.write(f"{h}:{p}:{ts}\n")
+    except OSError:
+        pass
+
+
+def clean_config_line(line: str) -> str:
+    return re.split(r"[#\s]", line.strip(), maxsplit=1)[0].strip()
+
+
+def extract_host_port(line: str) -> Optional[tuple[str, int]]:
+    cleaned = clean_config_line(line)
+    if not cleaned or len(cleaned) > 8192:
+        return None
+    try:
+        p = urllib.parse.urlparse(cleaned)
+        if p.scheme in ("vless", "trojan"):
+            if not p.hostname:
+                return None
+            return p.hostname, int(p.port or 443)
+        if p.scheme == "vmess":
+            b64 = cleaned[8:]
+            if not b64:
+                return None
+            b64 += "=" * (-len(b64) % 4)
+            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            add = data.get("add")
+            if not add:
+                return None
+            return str(add), int(data.get("port", 443))
+    except Exception:
+        pass
+    return None
+
+
+def _build_stream_settings(query: dict, fallback_host: str) -> dict:
+    network = (query.get("type", ["tcp"])[0] or "tcp").lower()
+    security = (query.get("security", ["none"])[0] or "none").lower()
+    sni = query.get("sni", query.get("host", [fallback_host]))[0]
+    fp = query.get("fp", [""])[0]
+    stream: dict = {"network": network}
+
+    if security == "reality":
+        stream["security"] = "reality"
+        stream["realitySettings"] = {
+            "fingerprint": fp or "chrome",
+            "serverName": sni,
+            "publicKey": query.get("pbk", [""])[0],
+            "shortId": query.get("sid", [""])[0],
+            "spiderX": query.get("spx", [""])[0],
+        }
+    elif security == "tls":
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {
+            "serverName": sni,
+            "fingerprint": fp or "chrome",
+            "allowInsecure": False,
+        }
+
+    if network == "ws":
+        stream["wsSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "headers": {"Host": query.get("host", [sni])[0]},
+        }
+    elif network == "grpc":
+        stream["grpcSettings"] = {
+            "serviceName": query.get("serviceName", [""])[0],
+            "multiMode": query.get("mode", [""])[0] == "multi",
+        }
+    elif network in ("h2", "http"):
+        stream["network"] = "h2"
+        stream["httpSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "host": [query.get("host", [sni])[0]],
+        }
+    elif network == "xhttp":
+        stream["xhttpSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "host": query.get("host", [sni])[0],
+        }
+        if "mode" in query:
+            stream["xhttpSettings"]["mode"] = query["mode"][0]
+        if "extra" in query:
+            try:
+                stream["xhttpSettings"]["extra"] = json.loads(urllib.parse.unquote(query["extra"][0]))
+            except Exception:
+                pass
+
+    return stream
+
+
+def parse_vless_to_outbound(line: str, tag: str) -> dict:
+    p = urllib.parse.urlparse(line)
+    query = urllib.parse.parse_qs(p.query)
+    user: dict = {"id": urllib.parse.unquote(p.username or ""), "encryption": "none"}
+    if flow := query.get("flow", [""])[0]:
+        user["flow"] = flow
+    return {
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {
+            "vnext": [{"address": p.hostname, "port": int(p.port or 443), "users": [user]}]
+        },
+        "streamSettings": _build_stream_settings(query, p.hostname or ""),
+    }
+
+
+def parse_vmess_to_outbound(line: str, tag: str) -> dict:
+    b64 = line[8:].split("#")[0]
+    b64 += "=" * (-len(b64) % 4)
+    data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+    net = str(data.get("net", "tcp")).lower()
+    stream: dict = {"network": net}
+    if data.get("tls") == "tls":
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {
+            "serverName": data.get("sni") or data.get("host", ""),
+            "allowInsecure": False,
+        }
+    if net == "ws":
+        stream["wsSettings"] = {
+            "path": data.get("path", "/"),
+            "headers": {"Host": data.get("host", "")},
+        }
+    elif net == "grpc":
+        stream["grpcSettings"] = {"serviceName": data.get("path", "")}
+    return {
+        "tag": tag,
+        "protocol": "vmess",
+        "settings": {
+            "vnext": [
+                {
+                    "address": data.get("add"),
+                    "port": int(data.get("port", 443)),
+                    "users": [
+                        {
+                            "id": data.get("id"),
+                            "alterId": int(data.get("aid", 0) or 0),
+                            "security": "auto",
+                        }
+                    ],
+                }
+            ]
+        },
+        "streamSettings": stream,
+    }
+
+
+def parse_trojan_to_outbound(line: str, tag: str) -> dict:
+    p = urllib.parse.urlparse(line)
+    query = urllib.parse.parse_qs(p.query)
+    if "security" not in query:
+        query["security"] = ["tls"]
+    return {
+        "tag": tag,
+        "protocol": "trojan",
+        "settings": {
+            "servers": [
+                {
+                    "address": p.hostname,
+                    "port": int(p.port or 443),
+                    "password": urllib.parse.unquote(p.username or ""),
+                }
+            ]
+        },
+        "streamSettings": _build_stream_settings(query, p.hostname or ""),
+    }
+
+
+def _line_to_outbound(line: str, tag: str = "test") -> Optional[dict]:
+    cleaned = clean_config_line(line)
+    try:
+        if cleaned.startswith("vless://"):
+            return parse_vless_to_outbound(cleaned, tag)
+        if cleaned.startswith("vmess://"):
+            return parse_vmess_to_outbound(cleaned, tag)
+        if cleaned.startswith("trojan://"):
+            return parse_trojan_to_outbound(cleaned, tag)
+    except Exception:
+        pass
+    return None
+
+
+def tcp_ping(host: str, port: int) -> Optional[float]:
+    try:
+        start = time.perf_counter()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(TCP_PING_TIMEOUT)
+            sock.connect((host, port))
+            return (time.perf_counter() - start) * 1000.0
+    except OSError:
+        return None
+
+
+def get_free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def wait_for_port(port: int, timeout: float = XRAY_STARTUP_TIMEOUT) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.25)
+                s.connect(("127.0.0.1", port))
+                return True
+        except OSError:
+            time.sleep(0.08)
+    return False
+
+
+def _spawn_xray(outbound: dict, socks_port: int):
+    config = {
+        "inbounds": [{"port": socks_port, "protocol": "socks", "settings": {"udp": False}}],
+        "outbounds": [outbound],
+        "log": {"loglevel": "none"},
+    }
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config, f)
+            path = f.name
+        proc = subprocess.Popen(
+            ["xray", "-config", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+        return proc, path
+    except OSError:
+        return None, None
+
+
+def _stop_xray(proc, path) -> None:
+    if proc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            pass
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def quick_reachability_check(line: str) -> Optional[str]:
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp:
+        return None
+    host, port = hp
+    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0:
+        return None
+    if is_blacklisted(host, port):
+        return None
+    ping = tcp_ping(host, port)
+    if ping is None or ping > MAX_TCP_PING_MS:
+        add_to_blacklist_local(host, port)
+        return None
+    return original
+
+
+def test_single_config(line: str):
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp:
+        return None
+    host, port = hp
+    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0:
+        return None
+    if is_blacklisted(host, port):
+        return None
+
+    outbound = _line_to_outbound(original)
+    if not outbound:
+        return None
+
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return None
+
+    try:
+        if not wait_for_port(socks_port):
+            add_to_blacklist_local(host, port)
+            return None
+
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
+        }
+
+        if RU_CHECK_URL:
+            try:
+                r_ru = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_PER_URL)
+                if r_ru.status_code >= 500:
+                    add_to_blacklist_local(host, port)
+                    return None
+            except requests.RequestException:
+                add_to_blacklist_local(host, port)
+                return None
+
+        success = 0
+        for url in TEST_URLS:
+            try:
+                r = requests.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
+                if r.status_code in (200, 204):
+                    success += 1
+                    if success >= MIN_SUCCESS:
+                        return original, host
+            except requests.RequestException:
+                continue
+
+        add_to_blacklist_local(host, port)
+        return None
+    except Exception:
+        add_to_blacklist_local(host, port)
+        return None
+    finally:
+        _stop_xray(proc, cfg)
+
+
+def tls_and_egress_check(line: str) -> Optional[str]:
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp:
+        return None
+    host, port = hp
+
+    outbound = _line_to_outbound(original)
+    if not outbound:
+        return None
+
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return None
+
+    try:
+        if not wait_for_port(socks_port):
+            add_to_blacklist_local(host, port)
+            return None
+
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
+        }
+
+        r = requests.get(EGRESS_TRACE_URL, proxies=proxies, timeout=TLS_CHECK_TIMEOUT)
+        body = r.text.strip()
+        if r.status_code != 200 or ("ip=" not in body or "loc=" not in body):
+            add_to_blacklist_local(host, port)
+            return None
+
+        r_tls = requests.get(
+            f"https://{TLS_PROBE_HOST}/cdn-cgi/trace",
+            proxies=proxies,
+            timeout=TLS_CHECK_TIMEOUT,
+        )
+        if r_tls.status_code != 200 or "ip=" not in r_tls.text:
+            add_to_blacklist_local(host, port)
+            return None
+
+        return original
+    except Exception:
+        add_to_blacklist_local(host, port)
+        return None
+    finally:
+        _stop_xray(proc, cfg)
+
+
+def measure_speed_multi(line: str) -> float:
+    outbound = _line_to_outbound(line)
+    if not outbound:
+        return 0.0
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return 0.0
+    try:
+        if not wait_for_port(socks_port):
+            return 0.0
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
+        }
+        run_speeds: list[float] = []
+        for url in SPEEDTEST_URLS:
+            try:
+                with requests.get(url, proxies=proxies, timeout=SPEEDTEST_TIMEOUT, stream=True) as r:
+                    if r.status_code != 200:
+                        continue
+                    downloaded = 0
+                    start = time.perf_counter()
+                    for chunk in r.iter_content(chunk_size=32768):
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        elapsed = time.perf_counter() - start
+                        if elapsed >= SPEEDTEST_TIMEOUT or downloaded >= 3 * 1024 * 1024:
+                            break
+                    elapsed = time.perf_counter() - start
+                    if downloaded >= 65536 and elapsed >= 0.25:
+                        mbps = (downloaded * 8.0) / (elapsed * 1_000_000.0)
+                        if 0.0 < mbps <= MAX_SANE_SPEED_MBPS:
+                            run_speeds.append(mbps)
+            except requests.RequestException:
+                continue
+
+        if not run_speeds:
+            return 0.0
+        return round(statistics.median(run_speeds), 1)
+    except Exception:
+        return 0.0
+    finally:
+        _stop_xray(proc, cfg)
+
+
+def fetch_configs_from_source(url: str) -> list[str]:
+    text = ""
+    proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY} if RU_EGRESS_PROXY else None
+    try:
+        with _session.get(url, timeout=(4, 8), stream=True, proxies=proxies) as r:
+            if r.status_code == 200:
+                content, downloaded, start_time = [], 0, time.time()
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        content.append(chunk)
+                        downloaded += len(chunk)
+                    if downloaded > 5 * 1024 * 1024 or (time.time() - start_time) > 12:
+                        break
+                text = b"".join(content).decode("utf-8", errors="ignore").strip()
+    except requests.RequestException:
+        return []
+
+    if not text:
+        return []
+
+    found_lines = []
+    found_lines.extend(re.findall(r"(?:vless|vmess|trojan)://[^\s\"'<>]+", text))
+
+    try:
+        clean_b64 = "".join(text.split())
+        padded = clean_b64 + "=" * (-len(clean_b64) % 4)
+        decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+        found_lines.extend(re.findall(r"(?:vless|vmess|trojan)://[^\s\"'<>]+", decoded))
     except Exception:
         pass
 
-def generate_subscriptions_list(ru_fast_files, ru_all_files, euro_fast_files, euro_all_files):
-    GITHUB_USER_REPO = "kort0881/vpn-checker-backend"
-    BRANCH = "main"
-    BASE_RAW = f"https://raw.githubusercontent.com/{GITHUB_USER_REPO}/{BRANCH}"
-    subs_lines = []
+    unique_lines = []
+    seen = set()
+    for line in found_lines:
+        line = line.strip()
+        if line not in seen:
+            seen.add(line)
+            unique_lines.append(line)
+    return unique_lines
 
-    subs_lines.append(f"# Generated: {datetime.now(timezone.utc).isoformat()} UTC")
-    subs_lines.append("")
 
-    def nonempty_files(folder, filenames):
-        out = []
-        for fname in filenames:
-            path = os.path.join(folder, fname)
-            if os.path.exists(path) and os.path.getsize(path) > 0:
-                out.append(fname)
-        return out
+def get_sources() -> list[str]:
+    resp = _session.get(SOURCES_LIST_URL, timeout=12)
+    resp.raise_for_status()
+    urls = []
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for part in line.split():
+            if part and not part.startswith("#"):
+                urls.append(part.strip())
+    log(f"Загружено {len(urls)} источников из {SOURCES_LIST_URL}")
+    return urls
 
-    # RUSSIA FAST
-    ru_fast_nonempty = nonempty_files(FOLDER_RU, ru_fast_files)
-    if ru_fast_nonempty:
-        subs_lines.append("=== 🇷🇺 RUSSIA (FAST) ===")
-        for filename in ru_fast_nonempty:
-            file_path = os.path.join(FOLDER_RU, filename)
-            mtime = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else ""
-            subs_lines.append(f"{BASE_RAW}/checked/RU_Best/{filename}?ts={mtime}")
-        subs_lines.append("")
 
-    # RUSSIA ALL
-    ru_all_nonempty = nonempty_files(FOLDER_RU, ru_all_files)
-    if ru_all_nonempty:
-        subs_lines.append("=== 🇷🇺 RUSSIA (ALL) ===")
-        for fname in ru_all_nonempty:
-            file_path = os.path.join(FOLDER_RU, fname)
-            mtime = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else ""
-            subs_lines.append(f"{BASE_RAW}/checked/RU_Best/{fname}?ts={mtime}")
-        subs_lines.append("")
+def fetch_all_configs_dedup() -> list[str]:
+    all_cfgs = []
+    source_list = get_sources()
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+        futures = {ex.submit(fetch_configs_from_source, src): src for src in source_list}
+        for future in as_completed(futures):
+            src = futures[future]
+            try:
+                cfgs = future.result()
+            except Exception:
+                cfgs = []
+            log(f"{src} -> {len(cfgs)} конфигов")
+            all_cfgs.extend(cfgs)
 
-    # EUROPE FAST
-    euro_fast_nonempty = nonempty_files(FOLDER_EURO, euro_fast_files)
-    if euro_fast_nonempty:
-        subs_lines.append("=== 🇪🇺 EUROPE (FAST) ===")
-        for filename in euro_fast_nonempty:
-            file_path = os.path.join(FOLDER_EURO, filename)
-            mtime = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else ""
-            subs_lines.append(f"{BASE_RAW}/checked/My_Euro/{filename}?ts={mtime}")
-        subs_lines.append("")
+    log(f"Собрано {len(all_cfgs)} сырых конфигов. Удаляем дубликаты...")
+    unique: dict[tuple[str, int], str] = {}
+    for cfg in all_cfgs:
+        hp = extract_host_port(cfg)
+        if hp and hp not in unique:
+            unique[hp] = cfg
+    configs = list(unique.values())
+    log(f"Уникальных конфигов: {len(configs)}")
+    return configs
 
-    # EUROPE ALL
-    euro_all_nonempty = nonempty_files(FOLDER_EURO, euro_all_files)
-    if euro_all_nonempty:
-        subs_lines.append("=== 🇪🇺 EUROPE (ALL) ===")
-        for fname in euro_all_nonempty:
-            file_path = os.path.join(FOLDER_EURO, fname)
-            mtime = int(os.path.getmtime(file_path)) if os.path.exists(file_path) else ""
-            subs_lines.append(f"{BASE_RAW}/checked/My_Euro/{fname}?ts={mtime}")
-        subs_lines.append("")
 
-    # WHITE RUSSIA
-    ru_white_path = os.path.join(FOLDER_RU, "ru_white_all_WHITE.txt")
-    if os.path.exists(ru_white_path) and os.path.getsize(ru_white_path) > 0:
-        subs_lines.append("=== ✅ WHITE RUSSIA (ALL) ===")
-        mtime = int(os.path.getmtime(ru_white_path))
-        subs_lines.append(f"{BASE_RAW}/checked/RU_Best/ru_white_all_WHITE.txt?ts={mtime}")
-        subs_lines.append("")
+def rename_config_with_label(line: str, label: str) -> str:
+    cleaned = clean_config_line(line)
+    if cleaned.lower().startswith("vmess://"):
+        b64 = cleaned[8:]
+        b64 += "=" * (-len(b64) % 4)
+        try:
+            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            data["ps"] = label
+            new_b64 = base64.b64encode(
+                json.dumps(data, ensure_ascii=False).encode("utf-8")
+            ).decode("utf-8")
+            return f"vmess://{new_b64}"
+        except Exception:
+            pass
+    return f"{cleaned}#{urllib.parse.quote(label)}"
 
-    # WHITE EUROPE
-    euro_white_path = os.path.join(FOLDER_EURO, "my_euro_all_WHITE.txt")
-    if os.path.exists(euro_white_path) and os.path.getsize(euro_white_path) > 0:
-        subs_lines.append("=== ✅ WHITE EUROPE (ALL) ===")
-        mtime = int(os.path.getmtime(euro_white_path))
-        subs_lines.append(f"{BASE_RAW}/checked/My_Euro/my_euro_all_WHITE.txt?ts={mtime}")
-        subs_lines.append("")
 
-    # BLACK RUSSIA
-    ru_black_path = os.path.join(FOLDER_RU, "ru_white_all_BLACK.txt")
-    if os.path.exists(ru_black_path) and os.path.getsize(ru_black_path) > 0:
-        subs_lines.append("=== ⚠️ BLACK RUSSIA (ALL) ===")
-        mtime = int(os.path.getmtime(ru_black_path))
-        subs_lines.append(f"{BASE_RAW}/checked/RU_Best/ru_white_all_BLACK.txt?ts={mtime}")
-        subs_lines.append("")
+def upload_to_github_with_retry(content: str, file_path: str) -> bool:
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        return False
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{file_path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    try:
+        r = _session.get(url, headers=headers, timeout=15)
+        sha = r.json().get("sha") if r.status_code == 200 else None
+        data = {
+            "message": f"Update {file_path} ({datetime.datetime.now().isoformat()})",
+            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+            "branch": BRANCH,
+        }
+        if sha:
+            data["sha"] = sha
+        put = _session.put(url, headers=headers, json=data, timeout=25)
+        if put.status_code in (200, 201):
+            log(f"{file_path} обновлён через GitHub API")
+            return True
+    except requests.RequestException:
+        pass
+    return False
 
-    # BLACK EUROPE
-    euro_black_path = os.path.join(FOLDER_EURO, "my_euro_all_BLACK.txt")
-    if os.path.exists(euro_black_path) and os.path.getsize(euro_black_path) > 0:
-        subs_lines.append("=== ⚠️ BLACK EUROPE (ALL) ===")
-        mtime = int(os.path.getmtime(euro_black_path))
-        subs_lines.append(f"{BASE_RAW}/checked/My_Euro/my_euro_all_BLACK.txt?ts={mtime}")
 
-    subs_path = os.path.join(BASE_DIR, "subscriptions_list.txt")
-    with open(subs_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(subs_lines))
+def main() -> None:
+    started_at = time.monotonic()
+    load_blacklist()
+    log(f"Чёрный список: {len(blacklist_dict)}")
 
-    http_count = sum(1 for l in subs_lines if l.startswith("http"))
-    print(f"\n📋 subscriptions_list.txt создан ({http_count} ссылок):")
-    for line in subs_lines:
-        if line:
-            print(f"  {line}")
-    return subs_path
+    configs = fetch_all_configs_dedup()
+    if len(configs) > MAX_CANDIDATES:
+        random.shuffle(configs)
+        configs = configs[:MAX_CANDIDATES]
+        log(f"Ограничено до {MAX_CANDIDATES} кандидатов для быстрого прохода.")
 
-# ==================== MAIN ====================
+    total = len(configs)
+    log(f"Фаза 1/3: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
+
+    alive = []
+    with ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
+        futures = {ex.submit(quick_reachability_check, c): c for c in configs}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                alive.append(res)
+            if i % 300 == 0 or i == total:
+                log(f"  пинг: {i}/{total}, живых: {len(alive)}")
+
+    if not time_left(started_at):
+        log("Достигнут лимит времени после фазы 1.")
+        save_blacklist()
+        return
+
+    log(f"Фаза 2/3: Xray-тест по сайтам ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    stage2 = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {ex.submit(test_single_config, c): c for c in alive}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                stage2.append(res[0])
+            if i % 100 == 0 or i == len(alive):
+                log(f"  xray-тест: {i}/{len(alive)}, прошло: {len(stage2)}")
+
+    if not time_left(started_at):
+        log("Достигнут лимит времени после фазы 2.")
+        save_blacklist()
+        return
+
+    log(f"Фаза 3/3: TLS/Egress-тест ({len(stage2)} конфигов, {THIRD_CHECK_WORKERS} потоков)...")
+    working = []
+    with ThreadPoolExecutor(max_workers=THIRD_CHECK_WORKERS) as ex:
+        futures = {ex.submit(tls_and_egress_check, c): c for c in stage2}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                working.append(res)
+            if i % 100 == 0 or i == len(stage2):
+                log(f"  tls/egress-тест: {i}/{len(stage2)}, рабочих: {len(working)}")
+
+    log(f"Итого рабочих серверов после 3 проверок: {len(working)} из {total}")
+    save_blacklist()
+
+    if not working:
+        log("Рабочих серверов не найдено.")
+        return
+
+    if not time_left(started_at):
+        log("Достигнут лимит времени перед замером скорости.")
+        return
+
+    log(f"Замер скорости ({len(working)} серверов, {SPEEDTEST_WORKERS} потоков)...")
+    speeds: list[tuple[str, float]] = []
+    with ThreadPoolExecutor(max_workers=SPEEDTEST_WORKERS) as ex:
+        futures = {ex.submit(measure_speed_multi, line): line for line in working}
+        done_spd = 0
+        for future in as_completed(futures):
+            done_spd += 1
+            line = futures[future]
+            try:
+                spd = future.result()
+            except Exception:
+                spd = 0.0
+            speeds.append((line, spd))
+            if done_spd % 50 == 0 or done_spd == len(working):
+                log(f"  скорость: {done_spd}/{len(working)}")
+
+    hosts = [hp[0] for line, _ in speeds if (hp := extract_host_port(line))]
+    prefetch_countries_batch(hosts)
+
+    ranked: list[tuple[float, str]] = []
+    for line, spd in speeds:
+        if spd < MIN_SPEED_MBPS:
+            continue
+        hp = extract_host_port(line)
+        country_name, country_code = get_country(hp[0]) if hp else ("Unknown", "")
+        if country_code in BLOCKED_COUNTRIES:
+            continue
+        flag = country_code_to_flag(country_code)
+        label = f"{flag} {country_name} | {spd:.1f} Mbps | {TAG_HANDLE}"
+        renamed = rename_config_with_label(line, label)
+        ranked.append((spd, renamed))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    final_configs = [item[1] for item in ranked]
+
+    if final_configs:
+        header = f"#profile-title: {PANEL_TITLE}"
+        plain_text = "\n".join([header] + final_configs) + "\n"
+        with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
+            f.write(plain_text)
+
+        b64_sub = base64.b64encode(plain_text.encode("utf-8")).decode("utf-8") + "\n"
+        with open(SUBSCRIPTION_OUTPUT, "w", encoding="utf-8") as f:
+            f.write(b64_sub)
+
+        upload_to_github_with_retry(plain_text, WORKING_OUTPUT)
+        upload_to_github_with_retry(b64_sub, SUBSCRIPTION_OUTPUT)
+        log(f"Готово! Сохранено серверов: {len(final_configs)} | Топ скорость: {ranked[0][0]:.1f} Mbps")
+    else:
+        log(f"Ни один сервер не прошёл порог скорости >= {MIN_SPEED_MBPS} Mbps.")
+
 
 if __name__ == "__main__":
-    print("=== CHECKER v6 (FAST/ALL + WHITE/BLACK + GEO-CACHE + THROTTLE) ===")
-    print(f"Параметры: CACHE={CACHE_HOURS}h, MAX_PING={MAX_PING_MS}ms, FAST={FAST_LIMIT}, HISTORY={MAX_HISTORY_AGE // 3600}h")
-
-    load_ip_cache()
-    print(f"📂 Дисковый ip_cache загружен: {len(_disk_ip_cache)} записей")
-
-    history = load_json(HISTORY_FILE)
-    tasks = fetch_keys(URLS_RU, "RU") + fetch_keys(URLS_MY, "MY")
-
-    # ОТЛАДОЧНЫЙ ВЫВОД
-    ru_count = sum(1 for _, tag in tasks if tag == "RU")
-    my_count = sum(1 for _, tag in tasks if tag == "MY")
-    print(f"📥 Загружено RU: {ru_count}, MY: {my_count}")
-
-    unique_tasks = {k: tag for k, tag in tasks}
-    all_items = list(unique_tasks.items())
-    if len(all_items) > MAX_KEYS_TO_CHECK:
-        all_items = all_items[:MAX_KEYS_TO_CHECK]
-
-    current_time = time.time()
-    to_check = []
-    res_ru = []
-    res_euro = []
-    dead_ru = []
-    dead_euro = []
-    euro_filtered_ru = 0
-
-    print(f"\n📊 Всего уникальных ключей: {len(all_items)}")
-
-    for k, tag in all_items:
-        k_id = k.split("#")[0]
-        cached = history.get(k_id)
-        if cached and (current_time - cached["time"] < CACHE_HOURS * 3600) and cached["alive"]:
-            latency = cached["latency"]
-            country = cached.get("country", "UNKNOWN")
-            host = cached.get("host", "")
-            final = make_final_key(k_id, latency, country)
-            if tag == "RU":
-                res_ru.append(final)
-            elif tag == "MY":
-                if is_russian_exit(k, host, country):
-                    euro_filtered_ru += 1
-                else:
-                    res_euro.append(final)
-        else:
-            to_check.append((k, tag))
-
-    print(f"✅ Из кэша: RU={len(res_ru)}, EURO={len(res_euro)}, EURO→RU filtered={euro_filtered_ru}")
-    print(f"🔍 На проверку: {len(to_check)}")
-
-    if to_check:
-        checked_ok = 0
-        with ThreadPoolExecutor(max_workers=THREADS) as executor:
-            future_map = {executor.submit(check_single_key, item): item for item in to_check}
-            for future in as_completed(future_map):
-                key, tag = future_map[future]
-                try:
-                    latency, _, country, host, original_key, err_type = future.result()
-                except Exception:
-                    if tag == "RU":
-                        dead_ru.append(key)
-                    else:
-                        dead_euro.append(key)
-                    continue
-                if latency is None:
-                    if tag == "RU":
-                        dead_ru.append(original_key)
-                    elif tag == "MY":
-                        dead_euro.append(original_key)
-                    continue
-                k_id = original_key.split("#")[0]
-                history[k_id] = {
-                    "alive": True,
-                    "latency": latency,
-                    "time": time.time(),
-                    "country": country,
-                    "host": host,
-                }
-                final = make_final_key(k_id, latency, country)
-                if tag == "RU":
-                    res_ru.append(final)
-                elif tag == "MY":
-                    if is_russian_exit(original_key, host, country):
-                        euro_filtered_ru += 1
-                        dead_euro.append(original_key)
-                    else:
-                        res_euro.append(final)
-                checked_ok += 1
-        print(f"✅ Проверено успешно: {checked_ok}")
-
-    save_ip_cache()
-    print(f"💾 ip_cache сохранён: {len(_disk_ip_cache)} записей")
-
-    save_json(
-        HISTORY_FILE,
-        {k: v for k, v in history.items() if current_time - v["time"] < MAX_HISTORY_AGE}
-    )
-
-    res_ru_clean = [k for k in res_ru if extract_ping(k) is not None and extract_ping(k) <= MAX_PING_MS]
-    res_euro_clean = [k for k in res_euro if extract_ping(k) is not None and extract_ping(k) <= MAX_PING_MS]
-
-    res_ru_clean.sort(key=extract_ping)
-    res_euro_clean.sort(key=extract_ping)
-
-    print(f"\n📈 После фильтрации (≤ {MAX_PING_MS} ms) и сортировки:")
-    print(f"  RU: {len(res_ru_clean)} ключей")
-    print(f"  EURO: {len(res_euro_clean)} ключей")
-
-    # ---------- РЕАЛЬНАЯ ПРОВЕРКА ЧЕРЕЗ XRAY/SING-BOX ----------
-    # Проверяем не «открыт ли TCP», а «открываются ли нужные сайты».
-    # Глубокая проверка дорогая, поэтому только топ-300 по задержке:
-    # остальные остаются в ALL с пометкой [unverified].
-    WHITE_TOP_N = 300
-    ru_top = res_ru_clean[:WHITE_TOP_N]
-    euro_top = res_euro_clean[:WHITE_TOP_N]
-
-    print(f"\n🔬 Белый чек через xray/sing-box: RU топ-{len(ru_top)}, EURO топ-{len(euro_top)}")
-    ru_white, ru_black, ru_unknown = batch_white_check(ru_top, history, workers=5, label="RU")
-    euro_white, euro_black, euro_unknown = batch_white_check(
-        euro_top, history, workers=5, label="EURO"
-    )
-
-    def status_map(white, black, unknown, top):
-        st = {k.split("#")[0]: "unverified" for k in top}
-        for k in white:
-            st[k.split("#")[0]] = "white"
-        for k in black:
-            st[k.split("#")[0]] = "black"
-        for k in unknown:
-            st[k.split("#")[0]] = "unsupported_proto"
-        return st
-
-    def annotate(keys, st):
-        out = []
-        for k in keys:
-            s = st.get(k.split("#")[0], "unverified")
-            out.append(k if s == "white" else f"{k} [{s}]")
-        return out
-
-    ru_status = status_map(ru_white, ru_black, ru_unknown, ru_top)
-    euro_status = status_map(euro_white, euro_black, euro_unknown, euro_top)
-    res_ru_all = annotate(res_ru_clean, ru_status)
-    res_euro_all = annotate(res_euro_clean, euro_status)
-
-    res_ru_fast = res_ru_clean[:FAST_LIMIT]
-    res_euro_fast = res_euro_clean[:FAST_LIMIT]
-
-    print(f"\n🚀 FAST слои (топ {FAST_LIMIT}):")
-    print(f"  RU FAST: {len(res_ru_fast)}")
-    print(f"  EURO FAST: {len(res_euro_fast)}")
-
-    print(f"\n💾 Сохранение RU FAST → {FOLDER_RU}:")
-    ru_fast_files = save_fixed_chunks_ru(res_ru_fast, FOLDER_RU)
-
-    print(f"\n💾 Сохранение EURO FAST → {FOLDER_EURO} (по {EURO_CHUNK_LIMIT} ключей):")
-    euro_fast_files = save_fixed_chunks_euro(res_euro_fast, FOLDER_EURO)
-
-    print(f"\n💾 Сохранение RU ALL → {FOLDER_RU}:")
-    ru_all_files = save_chunked(res_ru_all, FOLDER_RU, "ru_white_all")
-
-    print(f"\n💾 Сохранение EURO ALL → {FOLDER_EURO} (по {EURO_CHUNK_LIMIT} ключей):")
-    euro_all_files = save_chunked(res_euro_all, FOLDER_EURO, "my_euro_all", chunk_size=EURO_CHUNK_LIMIT)
-
-    print(f"\n💾 WHITE/BLACK → {FOLDER_RU}:")
-    save_exact(ru_white, FOLDER_RU, "ru_white_all_WHITE.txt")
-    save_exact(ru_black, FOLDER_RU, "ru_white_all_BLACK.txt")
-
-    print(f"\n💾 WHITE/BLACK → {FOLDER_EURO}:")
-    save_exact(euro_white, FOLDER_EURO, "my_euro_all_WHITE.txt")
-    save_exact(euro_black, FOLDER_EURO, "my_euro_all_BLACK.txt")
-
-    # Принудительная генерация subscriptions_list.txt с диагностикой
-    try:
-        generate_subscriptions_list(ru_fast_files, ru_all_files, euro_fast_files, euro_all_files)
-        print("✅ generate_subscriptions_list выполнен успешно")
-    except Exception as e:
-        print(f"❌ Ошибка при вызове generate_subscriptions_list: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # Проверяем, что файл действительно создан
-    subs_path = os.path.join(BASE_DIR, "subscriptions_list.txt")
-    if os.path.exists(subs_path):
-        print(f"✅ Файл {subs_path} существует, размер {os.path.getsize(subs_path)} байт")
-    else:
-        print(f"❌ Файл {subs_path} НЕ СУЩЕСТВУЕТ! Создаём резервный...")
-        # Создаём минимальный корректный файл, чтобы коммит прошёл
-        with open(subs_path, "w", encoding="utf-8") as f:
-            f.write("# Generated by fallback\n")
-            f.write("=== 🇷🇺 RUSSIA (ALL) ===\n")
-            for fname in ru_all_files:
-                f.write(f"https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/{fname}\n")
-        print(f"✅ Создан резервный файл {subs_path}")
-
-    print("\n" + "=" * 55)
-    print("📊 ФИНАЛЬНЫЙ ОТЧЁТ")
-    print("=" * 55)
-
-    print(f"\n✅ Результат:")
-    print(f"  RU FAST: {len(res_ru_fast)}, RU WHITE: {len(ru_white)}, RU BLACK: {len(ru_black)}, RU UNKNOWN: {len(ru_unknown)}")
-    print(f"  ALL: RU {len(res_ru_all)}, EURO {len(res_euro_all)} (вне топ-{WHITE_TOP_N} помечены [unverified])")
-    print(f"  EURO ключей отфильтровано как RU-exit: {euro_filtered_ru}")
-    print(f"  EURO FAST: {len(res_euro_fast)}, EURO WHITE: {len(euro_white)}, EURO BLACK: {len(euro_black)}, EURO UNKNOWN: {len(euro_unknown)}")
-
-    print(f"\n🧰 Движки: xray={'есть' if xray_available() else 'НЕТ'}, "
-          f"sing-box={'есть' if singbox_available() else 'НЕТ'}")
-    print(f"\n✅ WHITE (реально проверено через Xray/sing-box):")
-    print(f"  RU:    {len(ru_white)} (из {len(ru_top)} топ-{WHITE_TOP_N})")
-    print(f"  EURO:  {len(euro_white)} (из {len(euro_top)} топ-{WHITE_TOP_N})")
-    print(f"\n🟡 UNKNOWN (протокол не поддержан / нет бинаря):")
-    print(f"  RU:    {len(ru_unknown)}")
-    print(f"  EURO:  {len(euro_unknown)}")
-    print(f"  не проверялись (вне топ-{WHITE_TOP_N}, [unverified]): "
-          f"RU {max(0, len(res_ru_clean) - len(ru_top))}, "
-          f"EURO {max(0, len(res_euro_clean) - len(euro_top))}")
-
-    reasons = {}
-    for _label, counter in reason_summary().items():
-        for reason, n in counter.items():
-            if reason in ("cached_white", "cached_black", "white", ""):
-                continue
-            reasons[reason] = reasons.get(reason, 0) + n
-    print(f"\n⛔ Причины BLACK (топ-5):")
-    if reasons:
-        for reason, n in sorted(reasons.items(), key=lambda x: -x[1])[:5]:
-            print(f"  {reason}: {n}")
-    else:
-        print("  (нет данных)")
-
-    print(f"\n🌍 Источник страны (geo-статистика):")
-    with _geo_stats_lock:
-        stats = dict(_geo_stats)
-    total_geo = sum(stats.values()) or 1
-    for src in ("api", "cache", "fast", "unknown"):
-        n = stats.get(src, 0)
-        print(f"  {src:8s}: {n:5d}  ({n * 100 // total_geo}%)")
-    if _ip_api_disabled:
-        print("  ⚠️  ip-api был отключён из-за 429 в процессе работы")
-
-    print(f"\n❌ Ошибки соединения:")
-    with _err_stats_lock:
-        estats = dict(_err_stats)
-    total_err = sum(estats.values()) or 1
-    for kind in (ERR_TIMEOUT, ERR_TLS, ERR_DNS, ERR_OTHER):
-        n = estats.get(kind, 0)
-        print(f"  {kind:8s}: {n:5d}  ({n * 100 // total_err}%)")
-
-    print("\n✅ SUCCESS: FAST/ALL + WHITE/BLACK GENERATED")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    main()
