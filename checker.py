@@ -60,106 +60,89 @@ MY_CHANNEL = "@vlesstrojan"
 # ==================== ОБНОВЛЁННЫЙ СПИСОК URLS_RU ====================
 URLS_RU = [
     # старые источники (сохраняем все, что были)
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/BLACK_SS+All_RUS_base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/BLACK_VLESS_RUS_base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/BLACK_VLESS_RUS_mobile_base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/Vless-Reality-White-Lists-Rus-Mobile-2-base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/Vless-Reality-White-Lists-Rus-Mobile-base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/WHITE-CIDR-RU-all-base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/WHITE-CIDR-RU-checked-base64.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Base64/WHITE-SNI-RU-all-base64.txt",
-    "https://raw.githubusercontent.com/zieng2/wl/main/vless.txt",
-    "https://raw.githubusercontent.com/LowiKLive/BypassWhitelistRu/refs/heads/main/WhiteList-Bypass_Ru.txt",
-    "https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt",
-    "https://raw.githubusercontent.com/vsevjik/OBSpiskov/refs/heads/main/wwh",
-    "https://jsnegsukavsos.hb.ru-msk.vkcloud-storage.ru/love",
-    "https://etoneya.a9fm.site/1",
-    "https://s3c3.001.gpucloud.ru/vahe4xkwi/cjdr",
-    "https://raw.githubusercontent.com/zieng2/wl/refs/heads/main/vless_universal.txt",
-    "https://raw.githubusercontent.com/zieng2/wl/refs/heads/main/vless_lite.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-SNI-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-all.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile-2.txt",
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/WHITE-CIDR-RU-checked.txt",
-    "https://key.zarazaex.xyz/sub",
-    "https://rostunnel.vercel.app/mega.txt",
-    "https://subrostunnel.vercel.app/wl.txt",
-    "https://subrostunnel.vercel.app/gen.txt",
-    "https://etoneya.su/whitelist",
-    "https://raw.githubusercontent.com/Kirillo4ka/eavevpn-configs/refs/heads/main/WHITE-CIDR-RU-all.txt",
-    "https://raw.githubusercontent.com/Kirillo4ka/eavevpn-configs/refs/heads/main/WHITE-CIDR-RU-checked.txt",
-    "https://raw.githubusercontent.com/Kirillo4ka/eavevpn-configs/refs/heads/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
-    "https://raw.githubusercontent.com/Kirillo4ka/eavevpn-configs/refs/heads/main/WHITE-SNI-RU-all.txt",
-    "https://gist.githubusercontent.com/DestroyST6767/50af50221ca1858ba2084efc0f524fbc/raw/1dc2f8edf8b2d7ab2a85ffd970208aa6fbb65a8e/Destroy_ST%2520%25D0%2591%25D0%25A1",
-    "https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/selected.txt",
-    "https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/wl.txt",
-    "https://gitverse.ru/api/repos/bywarm/rser/raw/branch/master/merged.txt",
-    "https://raw.githubusercontent.com/Alex999ooo/VPN-for-Russia-/refs/heads/main/VPN%20by%20Alex999ooo%20%F0%9F%8F%B3%EF%B8%8F",
-    "https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt",
-    "https://raw.githubusercontent.com/dmitriistekolnikov/Free_vpns_for_Russ/refs/heads/main/Vrema.txt",
-    "https://raw.githubusercontent.com/dmitriistekolnikov/Free_vpns_for_Russ/refs/heads/main/Vip.txt",
-    "https://raw.githubusercontent.com/Temnuk/naabuzil/refs/heads/main/whitelist_full",
-    "https://raw.githubusercontent.com/Temnuk/naabuzil/refs/heads/main/whitelist",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/WHITELIST-ALL.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/subscriptions/1sub.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/subscriptions/2sub.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/subscriptions/3sub.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/subscriptions/4sub.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/subscriptions/5sub.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/best_keys.txt",
-    "https://raw.githubusercontent.com/ksenkovsolo/HardVPN-bypass-WhiteLists-/refs/heads/main/vpn-lte/good_keys.txt",
-    "https://raw.githubusercontent.com/AirLinkVPN1/AirLinkVPN/refs/heads/main/rkn_white_list",
-    "https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta7.txt",
-    "https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta6.txt",
-    "https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyaktestru.txt",
-    "https://obwl.vercel.app/configs/configs.txt",
-    "https://obwl.vercel.app/configs/selected.txt",
-    "https://tinyurl.com/AeryxVPNyandexua",
-    "https://raw.githubusercontent.com/VOID-Anonymity/V.O.I.D-VPN_Bypass/refs/heads/main/url_work.txt",
-    "https://raw.githubusercontent.com/dequar/deqwl/refs/heads/main/deray.txt",
-    "https://tinyurl.com/scalavpnbot",
-    "https://raw.githubusercontent.com/kama55726/KomaryServers/refs/heads/main/KomaryServ",
-    "https://raw.githubusercontent.com/LimeHi/Old-Context-Menu/refs/heads/main/afg.txt",
-    "https://raw.githubusercontent.com/nzea243/ikoV31tud_vpn/refs/heads/main/tri_228.txt",
-    "https://raw.githubusercontent.com/mbelspb-gif/gdffgd/refs/heads/main/Swordware.net",
-    "https://gist.githubusercontent.com/flaafix/c79a81037d15163360571c7a7331b153/raw/AetrisVPN.txt",
-    "https://raw.githubusercontent.com/HalyavusVPNUS/halyava-vpn-lte/refs/heads/main/lte.txt",
-
+  https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt
+https://gist.githubusercontent.com/guidongone/cce77f5be24a53992b45038c3fc2b852/raw/cc7a5285d22a30257c5314364f043cbbaadb108f/%25E5%25B0%258F%25E9%259D%2592%25E7%25A7%2591%25E5%25AD%25A6%25E7%25BD%2591V2ray%25E5%2585%258D%25E8%25B4%25B9%25E8%258A%2582%25E7%2582%25B9260531.txt
+https://raw.githubusercontent.com/pog7x/vpn-configs/refs/heads/master/githubmirror/1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/26.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/27.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/28.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/30.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/31.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/32.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/33.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/34.txt
+https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/8.txt
+https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
+https://internet-tenshi.kangel.xyz/1
+https://gist.githubusercontent.com/sevushyamamoto-stack/17bd65436db9cccddc55ef376e70cd7a/raw/fe6f77c72aa75b7364e5d2bdc008ef22b4cb16e9/gistfile1.txt
+https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
+https://raw.githubusercontent.com/ewecrow78-gif/whitelist1/main/list.txt
+https://raw.githubusercontent.com/btsk161/Freeinternet_byMygalaru.github.io/refs/heads/main/premium.txt
+https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat
+https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/main/subscriptions/FreeCFGHub1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_WHITE.txt
+https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta7.txt
+https://raw.githubusercontent.com/HalyavusVPNUS/halyava-vpn-mini/refs/heads/main/mini.txt
+https://raw.githubusercontent.com/v0id9/vpn-configs/refs/heads/main/vpn.txt
+https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/non_ru.txt
+https://gist.githubusercontent.com/rerererere395/250704ddbcc30f383bfe7cc0e2f29ba8/raw/8991efca05d31299b948e50103b1b1d0d310f2d9/gistfile1.txt
+https://raw.githubusercontent.com/Diversan313/apex-parser/refs/heads/main/subs/main/alive_full.txt
+https://raw.githubusercontent.com/WSJuJuBA01/WS_Parser/refs/heads/main/subscription.txt
+https://gist.githubusercontent.com/SlavaKat/2d75a18830db8315ee79d58f5ee62e30/raw/
+https://raw.githubusercontent.com/flaafix/AetrisVPN-white-list-lite/refs/heads/main/AetrisVPN.txt
+https://raw.githubusercontent.com/svinakraft-maker/FlareFeed/refs/heads/main/public/podpiska.txt
+https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+https://gitverse.ru/api/repos/Pizduk/PizdukVPN/raw/branch/master/WlSubPiz.txt
+https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt
+https://gidroksi.fun/black-list
+https://gidroksi.fun/white-list
+https://raw.githubusercontent.com/WSJuJuB01/WSVPN/refs/heads/main/sub.txt
     # ---------- НОВЫЕ ИСТОЧНИКИ (добавлены 09.07.2026) ----------
-    "https://tinyurl.com/freesub-scalavpnrobot",
-    "https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/refs/heads/main/subscriptions/FreeCFGHub1.txt",
-    "https://raw.githubusercontent.com/uretkavpn/Uretkavpn/refs/heads/main/UretkaVpn.txt",
-    "https://gist.githubusercontent.com/FrizanGAME/dfd1f7ac36511593dc6d0faff14cc8bb/raw/frizanVPN.txt",
-    "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/allkeysFreeCFGHub.txt",
-    "https://raw.githubusercontent.com/likzil/vless1/refs/heads/main/Treetcpvpn",
-    "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/FreeCFGHubSUB",
-    "https://raw.githubusercontent.com/RKPchannel/RKP_bypass_configs/refs/heads/main/whitelist.txt",
-    "https://tinyurl.com/AeryxWiFiLTE",
-    "https://tinyurl.com/5cnvrkmy",
-    "https://tinyurl.com/3mzxa6k6",
-    "https://tinyurl.com/Sub1EggAeryx",
-    "https://raw.githubusercontent.com/Ghost-LInk-star/GhostL/refs/heads/main/dizzga.txt",
-    "https://raw.githubusercontent.com/mbelspb-gif/bright/refs/heads/main/Kdlddl.sw",
-    "https://raw.githubusercontent.com/Ghost-LInk-star/bambuk/refs/heads/main/vpn.txt",
-    "https://gist.githubusercontent.com/nikitavalentinov90021-ai/b5f135a9547a559f8042cfc7c7cde32d/raw/3d454f959d5f4a2c37c47a5d4d9bd4c798506cea/LTE8464552823",
-    "https://gist.githubusercontent.com/pidarasuebisov-afk/e220b44264242d1a97c0908aba091edd/raw/PKN%20cocnyL",
-    "https://raw.githubusercontent.com/dmitriistekolnikov/Free_vpns_for_Russ/refs/heads/main/Vpn.txt",
-    "https://gist.githubusercontent.com/nikitavalentinov90021-ai/a4de8e24121096a7714be35465849a0c/raw/995e0ee28983e89e3dab94d9e80834514bd212c1/ID6592823693.txt",
-    "https://gist.githubusercontent.com/nikitavalentinov90021-ai/41901f30db6c78a6a4d0da27429f4fab/raw/6efae398be2ad0ab70ba257bab20a82053c36383/LTE.txt",
-    "https://gist.githubusercontent.com/VSPBOOST/d84dcf89bf31012a96ee60a9eb73b852/raw/4f6af123b4a0251806b89958c845666268283c5a/gistfile1.txt",
-    "https://gitverse.ru/api/repos/cid-uskoritel/cid-white/raw/branch/master/whitelist(beta).txt",
-    "https://raw.githubusercontent.com/ByeWhiteLists/ByeWhiteLists2/refs/heads/main/ByeWhiteLists2.txt",
-    "https://raw.githubusercontent.com/RYZgames31/UWB/refs/heads/main/wcfg",
-    "https://raw.githubusercontent.com/twinkalex1470-crypto/CatWhiteVPN/refs/heads/main/CaTWhiteVPN.txt",
-    "https://raw.githubusercontent.com/DarkFirexs/Whitelist-bypass_VPN/refs/heads/main/Whitelist%20%7C%20VPN",
-    "https://raw.githubusercontent.com/stanislavPLS/AuraChannel/refs/heads/main/ID%3D1%2Cdata%3D280427",
-    "https://raw.githubusercontent.com/stanislavPLS/GMVPN-users/refs/heads/main/id%3D1%2Cdata%3D120527",
-    "https://gitverse.ru/api/repos/cid-uskoritel/cid-white/raw/branch/master/whitelist.txt",
-    "https://sub.obbhod.online/premium",
-    "http://194.33.61.236:8080/premium",
-    "https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/refs/heads/main/subscriptions/whitelist-keys.txt",
-    "http://144.31.165.198:8080/premium",
-    "https://raw.githubusercontent.com/kama55726/KomaryServers/main/White-List-2"
+   https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-all.txt
+https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt
+https://gist.githubusercontent.com/guidongone/cce77f5be24a53992b45038c3fc2b852/raw/cc7a5285d22a30257c5314364f043cbbaadb108f/%25E5%25B0%258F%25E9%259D%2592%25E7%25A7%2591%25E5%25AD%25A6%25E7%25BD%2591V2ray%25E5%2585%258D%25E8%25B4%25B9%25E8%258A%2582%25E7%2582%25B9260531.txt
+https://raw.githubusercontent.com/pog7x/vpn-configs/refs/heads/master/githubmirror/1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/26.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/27.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/28.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/29.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/30.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/31.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/32.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/33.1.txt
+https://raw.githubusercontent.com/Hidashimora/free-vpn-anti-rkn/main/configs/34.txt
+https://raw.githubusercontent.com/hiztin/VLESS-PO-GRIBI/main/deploy/subscriptions/8.txt
+https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt
+https://internet-tenshi.kangel.xyz/1
+https://gist.githubusercontent.com/sevushyamamoto-stack/17bd65436db9cccddc55ef376e70cd7a/raw/fe6f77c72aa75b7364e5d2bdc008ef22b4cb16e9/gistfile1.txt
+https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ru/vless.txt
+https://raw.githubusercontent.com/ewecrow78-gif/whitelist1/main/list.txt
+https://raw.githubusercontent.com/btsk161/Freeinternet_byMygalaru.github.io/refs/heads/main/premium.txt
+https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat
+https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/main/subscriptions/FreeCFGHub1.txt
+https://raw.githubusercontent.com/kort0881/vpn-checker-backend/main/checked/RU_Best/ru_white_all_WHITE.txt
+https://raw.githubusercontent.com/Maskkost93/kizyak-vpn-4.0/refs/heads/main/kizyakbeta7.txt
+https://raw.githubusercontent.com/HalyavusVPNUS/halyava-vpn-mini/refs/heads/main/mini.txt
+https://raw.githubusercontent.com/v0id9/vpn-configs/refs/heads/main/vpn.txt
+https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/non_ru.txt
+https://gist.githubusercontent.com/rerererere395/250704ddbcc30f383bfe7cc0e2f29ba8/raw/8991efca05d31299b948e50103b1b1d0d310f2d9/gistfile1.txt
+https://raw.githubusercontent.com/Diversan313/apex-parser/refs/heads/main/subs/main/alive_full.txt
+https://raw.githubusercontent.com/WSJuJuBA01/WS_Parser/refs/heads/main/subscription.txt
+https://gist.githubusercontent.com/SlavaKat/2d75a18830db8315ee79d58f5ee62e30/raw/
+https://raw.githubusercontent.com/flaafix/AetrisVPN-white-list-lite/refs/heads/main/AetrisVPN.txt
+https://raw.githubusercontent.com/svinakraft-maker/FlareFeed/refs/heads/main/public/podpiska.txt
+https://gitverse.ru/api/repos/Bazz1024/vpn-configs-mirror/raw/branch/main/Vless-Reality-White-Lists-Rus-Mobile.txt
+https://gitverse.ru/api/repos/Pizduk/PizdukVPN/raw/branch/master/WlSubPiz.txt
+https://raw.githubusercontent.com/LimeHi/LimeVPN/refs/heads/main/whitelist.txt
+https://gidroksi.fun/black-list
+https://gidroksi.fun/white-list
+https://raw.githubusercontent.com/WSJuJuB01/WSVPN/refs/heads/main/sub.txt
 ]
 
 # ==================== КОМБИНИРОВАННЫЙ URLS_MY (старые + clean) ====================
