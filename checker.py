@@ -1,496 +1,788 @@
+#!/usr/bin/env python3
 import base64
 import concurrent.futures
 import datetime
 import json
 import os
+import random
 import re
-import shutil
+import signal
 import socket
+import statistics
 import subprocess
 import tempfile
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 SOURCES_LIST_URL = os.getenv(
     "SOURCES_LIST_URL",
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
 )
-RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
-RU_CHECK_URL = os.getenv("RU_CHECK_URL", "https://www.gstatic.com/generate_204").strip()
-SPEED_TEST_URL = os.getenv(
-    "SPEED_TEST_URL",
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+BRANCH = os.getenv("BRANCH", "main").strip()
+WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
+SUBSCRIPTION_OUTPUT = os.getenv("SUBSCRIPTION_FILE", "subscription.txt").strip()
+BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
+
+PANEL_TITLE = "antiRKN FREE"
+TAG_HANDLE = "@qw1lsVPN"
+BLACKLIST_AGE_LIMIT = 5 * 3600
+
+TIMEOUT_PER_URL = int(os.getenv("TIMEOUT_PER_URL", "7"))
+MAX_TCP_PING_MS = int(os.getenv("MAX_TCP_PING_MS", "900"))
+TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
+SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "8"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
+MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "2"))
+
+PING_WORKERS = int(os.getenv("PING_WORKERS", "30"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
+FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "6"))
+SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "3"))
+XRAY_STARTUP_TIMEOUT = 2.5
+
+TEST_URLS = [
+    "https://www.gstatic.com/generate_204",
+    "https://telegram.org",
+    "https://www.instagram.com",
+    "https://tiktok.com",
+]
+SPEEDTEST_URLS = [
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
-).strip()
+]
+BLOCKED_COUNTRIES = {"JP", "VN", "AF", "IR", "TM", "CN", "KR"}
 
-# Порог скорости в Мбит/с: поставьте "0" или "0.1", чтобы не отсеивать медленные но рабочие ноды
-MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.2"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "24"))
-MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "300"))
-MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "360"))
-TIMEOUT_SEC = float(os.getenv("TIMEOUT_SEC", "6"))
+blacklist_dict = {}
+blacklist_lock = Lock()
+country_cache = {}
+dns_cache = {}
 
-SUBSCRIPTION_TITLE = "antiRKN FREE"
-WORKING_OUTPUT = "working_configs.txt"
-SUBSCRIPTION_OUTPUT = "subscription.txt"
-BLACKLIST_FILE = "blacklist_local.txt"
-
-SCHEME_PATTERN = re.compile(r"(?:vless|vmess|trojan|ss)://[^\s\"'<>]+", re.IGNORECASE)
+_session = requests.Session()
+_session.headers.update({"User-Agent": "Mozilla/5.0", "Connection": "close"})
+_retry = Retry(total=2, backoff_factor=0.4, status_forcelist=[429, 500, 502, 503])
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=20, pool_maxsize=20)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
 
 
 def log(msg: str) -> None:
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def find_xray_binary() -> str:
-    found = shutil.which("xray")
-    if found:
-        return found
-    for candidate in ("/usr/local/bin/xray", os.path.abspath("xray_bin/xray")):
-        if os.path.exists(candidate):
-            return candidate
-    return "xray"
-
-
-XRAY_BIN = find_xray_binary()
+def resolve_host(host: str) -> Optional[str]:
+    if not host:
+        return None
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    if host in dns_cache:
+        return dns_cache[host]
+    try:
+        ip = socket.gethostbyname(host)
+        dns_cache[host] = ip
+        return ip
+    except socket.gaierror:
+        dns_cache[host] = None
+        return None
 
 
 def country_code_to_flag(code: str) -> str:
-    code = (code or "").strip().upper()
-    if len(code) != 2 or not code.isalpha():
+    if not code or len(code) != 2:
         return "🌐"
-    return "".join(chr(127397 + ord(ch)) for ch in code)
+    c = code.upper()
+    return chr(ord(c[0]) + 0x1F1A5) + chr(ord(c[1]) + 0x1F1A5)
 
 
-def find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def _parse_ipapi_com(d: dict):
+    if d.get("status") == "success":
+        return d.get("country", "Unknown"), d.get("countryCode", "").upper()
+    return None
 
 
-def decode_base64_smart(text: str) -> str:
-    cleaned = re.sub(r"\s+", "", text)
-    if not cleaned or not re.fullmatch(r"[A-Za-z0-9+/=_-]+", cleaned):
-        return ""
-    padded = cleaned + "=" * ((4 - len(cleaned) % 4) % 4)
-    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+def _parse_ipwho_is(d: dict):
+    if d.get("country_code"):
+        return d.get("country", "Unknown"), d.get("country_code", "").upper()
+    return None
+
+
+def _parse_freeipapi(d: dict):
+    if d.get("countryCode"):
+        return d.get("countryName", "Unknown"), d.get("countryCode", "").upper()
+    return None
+
+
+def get_country(host: str) -> tuple[str, str]:
+    ip = resolve_host(host) or host
+    if not ip:
+        return "Unknown", ""
+    if ip in country_cache:
+        return country_cache[ip]
+
+    providers = [
+        (f"http://ip-api.com/json/{ip}?fields=status,country,countryCode", _parse_ipapi_com),
+        (f"https://ipwho.is/{ip}", _parse_ipwho_is),
+        (f"https://freeipapi.com/api/json/{ip}", _parse_freeipapi),
+    ]
+    random.shuffle(providers)
+    for url, parser in providers:
         try:
-            raw = decoder(padded)
-            decoded = raw.decode("utf-8", errors="ignore")
-            if "://" in decoded:
-                return decoded
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                res = parser(r.json())
+                if res and res[1]:
+                    country_cache[ip] = res
+                    return res
         except Exception:
             continue
-    return ""
+
+    res = ("Unknown", "")
+    country_cache[ip] = res
+    return res
 
 
-def extract_links(content: str) -> list[str]:
-    links = set()
-    for match in SCHEME_PATTERN.findall(content):
-        links.add(match.strip())
-
-    decoded = decode_base64_smart(content)
-    if decoded:
-        for match in SCHEME_PATTERN.findall(decoded):
-            links.add(match.strip())
-
-    return list(links)
+def prefetch_countries_batch(hosts: list[str]) -> None:
+    unique_hosts = list({h for h in hosts if h})
+    if not unique_hosts:
+        return
+    log(f"Определение локаций ({len(unique_hosts)} серверов)...")
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        list(ex.map(get_country, unique_hosts))
 
 
-def fetch_sources(sources_url: str) -> list[str]:
-    log(f"Downloading sources list: {sources_url}")
-    resp = requests.get(sources_url, timeout=12)
-    resp.raise_for_status()
-    source_urls = [
-        line.strip()
-        for line in resp.text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    log(f"Found {len(source_urls)} subscription URLs")
-
-    all_links = set()
-    for idx, url in enumerate(source_urls, start=1):
-        try:
-            r = requests.get(url, timeout=8)
-            if r.status_code == 200 and r.text:
-                found = extract_links(r.text)
-                all_links.update(found)
-                log(
-                    f"Source [{idx}/{len(source_urls)}] OK: +{len(found)} links "
-                    f"(total unique: {len(all_links)})"
-                )
-            else:
-                log(f"Source [{idx}/{len(source_urls)}] HTTP {r.status_code}")
-        except requests.RequestException as e:
-            log(f"Source [{idx}/{len(source_urls)}] error: {type(e).__name__}")
-            continue
-
-    return sorted(all_links)
+def load_blacklist() -> None:
+    global blacklist_dict
+    blacklist_dict = {}
+    if not os.path.exists(BLACKLIST_FILE):
+        return
+    now = int(time.time())
+    try:
+        with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.rsplit(":", 2)
+                if len(parts) != 3:
+                    continue
+                h, p, ts = parts
+                try:
+                    p_int, ts_int = int(p), int(ts)
+                except ValueError:
+                    continue
+                if now - ts_int <= BLACKLIST_AGE_LIMIT:
+                    blacklist_dict[(h, p_int)] = ts_int
+    except OSError:
+        pass
 
 
-def parse_vless_outbound(uri: str) -> Optional[dict]:
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.scheme.lower() != "vless" or not parsed.hostname or not parsed.port:
+def is_blacklisted(host: str, port: int) -> bool:
+    with blacklist_lock:
+        ts = blacklist_dict.get((host, port))
+        if ts is None:
+            return False
+        if int(time.time()) - ts > BLACKLIST_AGE_LIMIT:
+            del blacklist_dict[(host, port)]
+            return False
+        return True
+
+
+def add_to_blacklist_local(host: str, port: int) -> None:
+    key = (host, port)
+    with blacklist_lock:
+        if key in blacklist_dict:
+            return
+        blacklist_dict[key] = int(time.time())
+    try:
+        with open(BLACKLIST_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{host}:{port}:{int(time.time())}\n")
+    except OSError:
+        pass
+
+
+def save_blacklist() -> None:
+    with blacklist_lock:
+        snapshot = dict(blacklist_dict)
+    try:
+        with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            for (h, p), ts in snapshot.items():
+                f.write(f"{h}:{p}:{ts}\n")
+    except OSError:
+        pass
+
+
+def clean_config_line(line: str) -> str:
+    return line.split("#")[0].strip()
+
+
+def extract_host_port(line: str):
+    cleaned = clean_config_line(line)
+    if not cleaned or len(cleaned) > 8192:
         return None
+    try:
+        p = urllib.parse.urlparse(cleaned)
+        if p.scheme in ("vless", "trojan"):
+            if not p.hostname:
+                return None
+            return p.hostname, int(p.port or 443)
+        if p.scheme == "vmess":
+            b64 = cleaned[8:]
+            if not b64:
+                return None
+            b64 += "=" * (-len(b64) % 4)
+            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            add = data.get("add")
+            if not add:
+                return None
+            return str(add), int(data.get("port", 443))
+    except Exception:
+        pass
+    return None
 
-    qs = urllib.parse.parse_qs(parsed.query)
-    security = qs.get("security", ["none"])[0]
-    network = qs.get("type", ["tcp"])[0]
-    flow = qs.get("flow", [""])[0]
 
-    user = {"id": urllib.parse.unquote(parsed.username or ""), "encryption": "none"}
-    if flow:
-        user["flow"] = flow
+def _build_stream_settings(query: dict, fallback_host: str) -> dict:
+    network = (query.get("type", ["tcp"])[0] or "tcp").lower()
+    security = (query.get("security", ["none"])[0] or "none").lower()
+    sni = query.get("sni", query.get("host", [fallback_host]))[0]
+    fp = query.get("fp", [""])[0]
+    stream: dict = {"network": network}
 
-    stream_settings: dict = {"network": network, "security": security}
+    if security == "reality":
+        stream["security"] = "reality"
+        stream["realitySettings"] = {
+            "fingerprint": fp or "chrome",
+            "serverName": sni,
+            "publicKey": query.get("pbk", [""])[0],
+            "shortId": query.get("sid", [""])[0],
+            "spiderX": query.get("spx", [""])[0],
+        }
+    elif security == "tls":
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {
+            "serverName": sni,
+            "fingerprint": fp or "chrome",
+            "allowInsecure": False,
+        }
 
     if network == "ws":
-        stream_settings["wsSettings"] = {
-            "path": qs.get("path", ["/"])[0],
-            "headers": {"Host": qs.get("host", [parsed.hostname])[0]},
+        stream["wsSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "headers": {"Host": query.get("host", [sni])[0]},
         }
     elif network == "grpc":
-        stream_settings["grpcSettings"] = {
-            "serviceName": qs.get("serviceName", [""])[0],
+        stream["grpcSettings"] = {
+            "serviceName": query.get("serviceName", [""])[0],
+            "multiMode": query.get("mode", [""])[0] == "multi",
         }
+    elif network in ("h2", "http"):
+        stream["network"] = "h2"
+        stream["httpSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "host": [query.get("host", [sni])[0]],
+        }
+    elif network == "xhttp":
+        stream["xhttpSettings"] = {
+            "path": query.get("path", ["/"])[0],
+            "host": query.get("host", [sni])[0],
+        }
+        if "mode" in query:
+            stream["xhttpSettings"]["mode"] = query["mode"][0]
+        if "extra" in query:
+            try:
+                stream["xhttpSettings"]["extra"] = json.loads(urllib.parse.unquote(query["extra"][0]))
+            except Exception:
+                pass
 
-    if security == "tls":
-        stream_settings["tlsSettings"] = {
-            "serverName": qs.get("sni", [parsed.hostname])[0],
-            "allowInsecure": qs.get("allowInsecure", ["0"])[0] in ("1", "true"),
-        }
-    elif security == "reality":
-        stream_settings["realitySettings"] = {
-            "show": False,
-            "serverName": qs.get("sni", [parsed.hostname])[0],
-            "fingerprint": qs.get("fp", ["chrome"])[0],
-            "publicKey": qs.get("pbk", [""])[0],
-            "shortId": qs.get("sid", [""])[0],
-            "spiderX": qs.get("spx", ["/"])[0],
-        }
+    return stream
 
+
+def parse_vless_to_outbound(line: str, tag: str) -> dict:
+    p = urllib.parse.urlparse(line)
+    query = urllib.parse.parse_qs(p.query)
+    user: dict = {"id": urllib.parse.unquote(p.username or ""), "encryption": "none"}
+    if flow := query.get("flow", [""])[0]:
+        user["flow"] = flow
     return {
+        "tag": tag,
         "protocol": "vless",
         "settings": {
-            "vnext": [
-                {
-                    "address": parsed.hostname,
-                    "port": int(parsed.port),
-                    "users": [user],
-                }
-            ]
+            "vnext": [{"address": p.hostname, "port": int(p.port or 443), "users": [user]}]
         },
-        "streamSettings": stream_settings,
+        "streamSettings": _build_stream_settings(query, p.hostname or ""),
     }
 
 
-def parse_vmess_outbound(uri: str) -> Optional[dict]:
-    b64_part = uri[8:].split("#", 1)[0]
-    decoded = decode_base64_smart(b64_part)
-    if not decoded:
-        return None
-    try:
-        cfg = json.loads(decoded)
-    except json.JSONDecodeError:
-        return None
-
-    host = cfg.get("add")
-    port = cfg.get("port")
-    uid = cfg.get("id")
-    if not host or not port or not uid:
-        return None
-
-    net = cfg.get("net", "tcp")
-    tls = cfg.get("tls", "")
-    stream_settings: dict = {"network": net, "security": "tls" if tls == "tls" else "none"}
+def parse_vmess_to_outbound(line: str, tag: str) -> dict:
+    b64 = line[8:].split("#")[0]
+    b64 += "=" * (-len(b64) % 4)
+    data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+    net = str(data.get("net", "tcp")).lower()
+    stream: dict = {"network": net}
+    if data.get("tls") == "tls":
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {
+            "serverName": data.get("sni") or data.get("host", ""),
+            "allowInsecure": False,
+        }
     if net == "ws":
-        stream_settings["wsSettings"] = {
-            "path": cfg.get("path", "/"),
-            "headers": {"Host": cfg.get("host") or host},
+        stream["wsSettings"] = {
+            "path": data.get("path", "/"),
+            "headers": {"Host": data.get("host", "")},
         }
-    if stream_settings["security"] == "tls":
-        stream_settings["tlsSettings"] = {
-            "serverName": cfg.get("sni") or cfg.get("host") or host,
-            "allowInsecure": True,
-        }
-
+    elif net == "grpc":
+        stream["grpcSettings"] = {"serviceName": data.get("path", "")}
     return {
+        "tag": tag,
         "protocol": "vmess",
         "settings": {
             "vnext": [
                 {
-                    "address": host,
-                    "port": int(port),
-                    "users": [{"id": uid, "alterId": int(cfg.get("aid", 0)), "security": "auto"}],
+                    "address": data.get("add"),
+                    "port": int(data.get("port", 443)),
+                    "users": [
+                        {
+                            "id": data.get("id"),
+                            "alterId": int(data.get("aid", 0) or 0),
+                            "security": "auto",
+                        }
+                    ],
                 }
             ]
         },
-        "streamSettings": stream_settings,
+        "streamSettings": stream,
     }
 
 
-def parse_trojan_outbound(uri: str) -> Optional[dict]:
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.scheme.lower() != "trojan" or not parsed.hostname or not parsed.port:
-        return None
-    qs = urllib.parse.parse_qs(parsed.query)
-    sni = qs.get("sni", [parsed.hostname])[0]
+def parse_trojan_to_outbound(line: str, tag: str) -> dict:
+    p = urllib.parse.urlparse(line)
+    query = urllib.parse.parse_qs(p.query)
+    if "security" not in query:
+        query["security"] = ["tls"]
     return {
+        "tag": tag,
         "protocol": "trojan",
         "settings": {
             "servers": [
                 {
-                    "address": parsed.hostname,
-                    "port": int(parsed.port),
-                    "password": urllib.parse.unquote(parsed.username or ""),
+                    "address": p.hostname,
+                    "port": int(p.port or 443),
+                    "password": urllib.parse.unquote(p.username or ""),
                 }
             ]
         },
-        "streamSettings": {
-            "network": qs.get("type", ["tcp"])[0],
-            "security": "tls",
-            "tlsSettings": {
-                "serverName": sni,
-                "allowInsecure": qs.get("allowInsecure", ["0"])[0] in ("1", "true"),
-            },
-        },
+        "streamSettings": _build_stream_settings(query, p.hostname or ""),
     }
 
 
-def build_outbound(uri: str) -> Optional[dict]:
-    lower = uri.lower()
-    if lower.startswith("vless://"):
-        return parse_vless_outbound(uri)
-    if lower.startswith("vmess://"):
-        return parse_vmess_outbound(uri)
-    if lower.startswith("trojan://"):
-        return parse_trojan_outbound(uri)
+def _line_to_outbound(line: str, tag: str = "test") -> Optional[dict]:
+    cleaned = clean_config_line(line)
+    try:
+        if cleaned.startswith("vless://"):
+            return parse_vless_to_outbound(cleaned, tag)
+        if cleaned.startswith("vmess://"):
+            return parse_vmess_to_outbound(cleaned, tag)
+        if cleaned.startswith("trojan://"):
+            return parse_trojan_to_outbound(cleaned, tag)
+    except Exception:
+        pass
     return None
 
 
-def detect_geo_via_proxies(proxies: dict[str, str]) -> tuple[str, str]:
+def tcp_ping(host: str, port: int) -> Optional[float]:
     try:
-        r = requests.get(
-            "http://ip-api.com/json/?fields=status,country,countryCode",
-            proxies=proxies,
-            timeout=5,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("status") == "success":
-                code = data.get("countryCode", "")
-                name = data.get("country", "Unknown")
-                return country_code_to_flag(code), name
-    except Exception:
-        pass
-    return "🌐", "Unknown"
+        start = time.perf_counter()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(TCP_PING_TIMEOUT)
+            sock.connect((host, port))
+            return (time.perf_counter() - start) * 1000.0
+    except OSError:
+        return None
 
 
-def check_ru_reachability(proxies: dict[str, str]) -> bool:
-    if RU_EGRESS_PROXY:
-        ru_proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY}
+def get_free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def wait_for_port(port: int, timeout: float = XRAY_STARTUP_TIMEOUT) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            r = requests.get(RU_CHECK_URL, proxies=ru_proxies, timeout=TIMEOUT_SEC)
-            if r.status_code >= 500:
-                return False
-        except requests.RequestException:
-            return False
-
-    try:
-        r = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_SEC)
-        return r.status_code < 500
-    except requests.RequestException:
-        return False
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                s.connect(("127.0.0.1", port))
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
 
 
-def measure_speed_mbps(proxies: dict[str, str]) -> float:
-    start = time.monotonic()
-    total_bytes = 0
-    with requests.get(SPEED_TEST_URL, proxies=proxies, stream=True, timeout=TIMEOUT_SEC) as resp:
-        resp.raise_for_status()
-        for chunk in resp.iter_content(chunk_size=32768):
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if time.monotonic() - start >= 2.5:
-                break
-
-    elapsed = max(time.monotonic() - start, 0.001)
-    mbps = (total_bytes * 8) / (elapsed * 1_000_000)
-    return round(mbps, 1)
-
-
-def format_server_label(flag: str, country_name: str, speed_mbps: float, updated_at: str) -> str:
-    return (
-        f"{flag} {country_name} | последнее обновление {updated_at} | "
-        f"{speed_mbps:.1f} Mbps | @qw1lsVPN"
-    )
-
-
-def rename_config(uri: str, label: str) -> str:
-    if uri.lower().startswith("vmess://"):
-        b64_part = uri[8:].split("#", 1)[0]
-        decoded = decode_base64_smart(b64_part)
-        if decoded:
-            try:
-                cfg = json.loads(decoded)
-                cfg["ps"] = label
-                new_b64 = base64.b64encode(
-                    json.dumps(cfg, ensure_ascii=False).encode("utf-8")
-                ).decode("utf-8")
-                return f"vmess://{new_b64}"
-            except Exception:
-                pass
-
-    base_uri = re.split(r"[#\s]", uri.strip(), maxsplit=1)[0]
-    encoded_label = urllib.parse.quote(label)
-    return f"{base_uri}#{encoded_label}"
-
-
-def test_single_link(uri: str, updated_at: str) -> tuple[str, float, Optional[str]]:
-    outbound = build_outbound(uri)
-    if not outbound:
-        return uri, 0.0, None
-
-    local_port = find_free_port()
-    xray_config = {
-        "log": {"loglevel": "none"},
-        "inbounds": [
-            {
-                "listen": "127.0.0.1",
-                "port": local_port,
-                "protocol": "socks",
-                "settings": {"udp": False},
-            }
-        ],
+def _spawn_xray(outbound: dict, socks_port: int):
+    config = {
+        "inbounds": [{"port": socks_port, "protocol": "socks", "settings": {"udp": False}}],
         "outbounds": [outbound],
+        "log": {"loglevel": "warning"},
     }
-
-    proc = None
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
-            json.dump(xray_config, tf)
-            tmp_path = tf.name
-
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config, f, indent=2)
+            path = f.name
         proc = subprocess.Popen(
-            [XRAY_BIN, "run", "-c", tmp_path],
+            ["xray", "-config", path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
         )
-        time.sleep(0.25)
+        return proc, path
+    except OSError:
+        return None, None
 
-        socks_url = f"socks5h://127.0.0.1:{local_port}"
-        proxies = {"http": socks_url, "https": socks_url}
 
-        if not check_ru_reachability(proxies):
-            return uri, 0.0, None
+def _stop_xray(proc, path) -> None:
+    if proc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
-        speed_mbps = measure_speed_mbps(proxies)
-        if speed_mbps < MIN_SPEED_MBPS:
-            return uri, speed_mbps, None
 
-        flag, country_name = detect_geo_via_proxies(proxies)
-        label = format_server_label(flag, country_name, speed_mbps, updated_at)
-        renamed_uri = rename_config(uri, label)
-        return uri, speed_mbps, renamed_uri
+def quick_reachability_check(line: str) -> Optional[str]:
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp:
+        return None
+    host, port = hp
+    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0:
+        return None
+    if is_blacklisted(host, port):
+        return None
+    ping = tcp_ping(host, port)
+    if ping is None or ping > MAX_TCP_PING_MS:
+        add_to_blacklist_local(host, port)
+        return None
+    return original
+
+
+def test_single_config(line: str):
+    original = line.strip()
+    hp = extract_host_port(original)
+    if not hp:
+        return None
+    host, port = hp
+    if host in ("0.0.0.0", "127.0.0.1", "localhost") or port == 0:
+        return None
+    if is_blacklisted(host, port):
+        return None
+
+    outbound = _line_to_outbound(original)
+    if not outbound:
+        return None
+
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return None
+
+    try:
+        if not wait_for_port(socks_port):
+            add_to_blacklist_local(host, port)
+            return None
+
+        proxies = {
+            "http": f"socks5://127.0.0.1:{socks_port}",
+            "https": f"socks5://127.0.0.1:{socks_port}",
+        }
+        success = 0
+        for url in TEST_URLS:
+            try:
+                r = requests.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
+                if r.status_code in (200, 204):
+                    success += 1
+                    if success >= MIN_SUCCESS:
+                        return original, host
+            except requests.RequestException:
+                continue
+
+        add_to_blacklist_local(host, port)
+        return None
     except Exception:
-        return uri, 0.0, None
+        add_to_blacklist_local(host, port)
+        return None
     finally:
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        _stop_xray(proc, cfg)
 
 
-def load_blacklist(path: str) -> set[str]:
-    if not os.path.exists(path):
-        return set()
-    with open(path, "r", encoding="utf-8") as f:
-        return {line.strip() for line in f if line.strip()}
+def measure_speed_multi(line: str) -> float:
+    outbound = _line_to_outbound(line)
+    if not outbound:
+        return 0.0
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return 0.0
+    try:
+        if not wait_for_port(socks_port):
+            return 0.0
+        proxies = {
+            "http": f"socks5://127.0.0.1:{socks_port}",
+            "https": f"socks5://127.0.0.1:{socks_port}",
+        }
+        speeds = []
+        for url in SPEEDTEST_URLS:
+            try:
+                with requests.get(url, proxies=proxies, timeout=6, stream=True) as r:
+                    if r.status_code != 200:
+                        continue
+                    downloaded = 0
+                    start = time.perf_counter()
+                    for chunk in r.iter_content(chunk_size=4096):
+                        if chunk:
+                            downloaded += len(chunk)
+                            elapsed = time.perf_counter() - start
+                            if elapsed > 0 and downloaded > 0:
+                                speeds.append((downloaded / (1024 * 1024) * 8.0) / elapsed)
+                            if elapsed > SPEEDTEST_TIMEOUT:
+                                break
+            except requests.RequestException:
+                continue
+        return round(statistics.median(speeds), 1) if speeds else 0.0
+    except Exception:
+        return 0.0
+    finally:
+        _stop_xray(proc, cfg)
+
+
+def fetch_configs_from_source(url: str) -> list[str]:
+    text = ""
+    try:
+        with _session.get(url, timeout=(5, 10), stream=True) as r:
+            if r.status_code == 200:
+                content, downloaded, start_time = [], 0, time.time()
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        content.append(chunk)
+                        downloaded += len(chunk)
+                    if downloaded > 5 * 1024 * 1024 or (time.time() - start_time) > 15:
+                        break
+                text = b"".join(content).decode("utf-8", errors="ignore").strip()
+    except requests.RequestException:
+        return []
+
+    if not text:
+        return []
+
+    found_lines = []
+    found_lines.extend(re.findall(r"(?:vless|vmess|trojan)://[^\s\"'<>]+", text))
+
+    try:
+        clean_b64 = "".join(text.split())
+        padded = clean_b64 + "=" * (-len(clean_b64) % 4)
+        decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+        found_lines.extend(re.findall(r"(?:vless|vmess|trojan)://[^\s\"'<>]+", decoded))
+    except Exception:
+        pass
+
+    unique_lines = []
+    seen = set()
+    for line in found_lines:
+        line = line.strip()
+        if line not in seen:
+            seen.add(line)
+            unique_lines.append(line)
+    return unique_lines
+
+
+def get_sources() -> list[str]:
+    resp = _session.get(SOURCES_LIST_URL, timeout=15)
+    resp.raise_for_status()
+    urls = []
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for part in line.split():
+            if part and not part.startswith("#"):
+                urls.append(part.strip())
+    log(f"Загружено {len(urls)} источников из {SOURCES_LIST_URL}")
+    return urls
+
+
+def fetch_all_configs_dedup() -> list[str]:
+    all_cfgs = []
+    source_list = get_sources()
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+        futures = {ex.submit(fetch_configs_from_source, src): src for src in source_list}
+        for future in as_completed(futures):
+            src = futures[future]
+            try:
+                cfgs = future.result()
+            except Exception:
+                cfgs = []
+            log(f"{src} -> {len(cfgs)} конфигов (vless/vmess/trojan)")
+            all_cfgs.extend(cfgs)
+
+    log(f"Собрано {len(all_cfgs)} сырых конфигов. Удаляем дубликаты...")
+    unique = {}
+    for cfg in all_cfgs:
+        hp = extract_host_port(cfg)
+        if hp and hp not in unique:
+            unique[hp] = cfg
+    configs = list(unique.values())
+    log(f"Уникальных конфигов: {len(configs)}")
+    return configs
+
+
+def rename_config_with_label(line: str, label: str) -> str:
+    cleaned = clean_config_line(line)
+    if cleaned.lower().startswith("vmess://"):
+        b64 = cleaned[8:]
+        b64 += "=" * (-len(b64) % 4)
+        try:
+            data = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            data["ps"] = label
+            new_b64 = base64.b64encode(
+                json.dumps(data, ensure_ascii=False).encode("utf-8")
+            ).decode("utf-8")
+            return f"vmess://{new_b64}"
+        except Exception:
+            pass
+    return f"{cleaned}#{urllib.parse.quote(label)}"
+
+
+def upload_to_github_with_retry(content: str, file_path: str) -> bool:
+    if not GITHUB_TOKEN or not GITHUB_REPOSITORY:
+        return False
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{file_path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    try:
+        r = _session.get(url, headers=headers, timeout=15)
+        sha = r.json().get("sha") if r.status_code == 200 else None
+        data = {
+            "message": f"Update {file_path} ({datetime.datetime.now().isoformat()})",
+            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+            "branch": BRANCH,
+        }
+        if sha:
+            data["sha"] = sha
+        put = _session.put(url, headers=headers, json=data, timeout=25)
+        if put.status_code in (200, 201):
+            log(f"{file_path} обновлён через GitHub API")
+            return True
+    except requests.RequestException:
+        pass
+    return False
 
 
 def main() -> None:
-    started_at = time.monotonic()
-    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
-    blacklist = load_blacklist(BLACKLIST_FILE)
-    log(f"Loaded blacklist entries: {len(blacklist)}")
+    load_blacklist()
+    log(f"Чёрный список: {len(blacklist_dict)}")
 
-    all_links = fetch_sources(SOURCES_LIST_URL)
-    candidates = [u for u in all_links if u not in blacklist]
+    configs = fetch_all_configs_dedup()
+    total = len(configs)
+    log(f"Фаза 1/2: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
 
-    # Если почти все ссылки оказались в блэклисте — берём свежие ссылки из списка, чтобы не остаться с 0 кандидатов
-    if not candidates and all_links:
-        log("Blacklist filtered out all links, retrying fresh links from sources...")
-        candidates = all_links
-
-    candidates = candidates[:MAX_CANDIDATES]
-    log(f"Candidates to test: {len(candidates)} (min_speed={MIN_SPEED_MBPS} Mbps)")
-
-    results: list[tuple[float, str]] = []
-    failed: list[str] = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_uri = {
-            executor.submit(test_single_link, uri, updated_at): uri for uri in candidates
-        }
-        done_count = 0
-        for fut in concurrent.futures.as_completed(future_to_uri):
-            done_count += 1
-            fallback_uri = future_to_uri[fut]
+    alive = []
+    with ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
+        futures = {ex.submit(quick_reachability_check, c): c for c in configs}
+        for i, future in enumerate(as_completed(futures), 1):
             try:
-                raw_uri, speed_mbps, renamed_uri = fut.result(timeout=TIMEOUT_SEC * 2 + 4)
+                res = future.result()
             except Exception:
-                raw_uri, speed_mbps, renamed_uri = fallback_uri, 0.0, None
+                res = None
+            if res:
+                alive.append(res)
+            if i % 250 == 0 or i == total:
+                log(f"  пинг: {i}/{total}, живых: {len(alive)}")
 
-            if renamed_uri:
-                results.append((speed_mbps, renamed_uri))
-            else:
-                failed.append(raw_uri)
+    log(f"Фаза 2/2: Xray-тест ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    working = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {ex.submit(test_single_config, c): c for c in alive}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                working.append(res[0])
+            if i % 50 == 0 or i == len(alive):
+                log(f"  xray-тест: {i}/{len(alive)}, рабочих: {len(working)}")
 
-            if done_count % 25 == 0 or done_count == len(candidates):
-                log(f"Progress: {done_count}/{len(candidates)} | Working so far: {len(results)}")
+    log(f"Рабочих по Xray: {len(working)} из {total}")
+    if not working:
+        save_blacklist()
+        log("Рабочих серверов не найдено.")
+        return
 
-            if time.monotonic() - started_at > MAX_RUN_SECONDS:
-                log(f"Reached time limit ({MAX_RUN_SECONDS}s), stopping early cleanly")
-                break
+    log(f"Замер скорости ({len(working)} серверов, {SPEEDTEST_WORKERS} потоков)...")
+    speeds = []
+    with ThreadPoolExecutor(max_workers=SPEEDTEST_WORKERS) as ex:
+        futures = {ex.submit(measure_speed_multi, line): line for line in working}
+        for future in as_completed(futures):
+            line = futures[future]
+            try:
+                spd = future.result()
+            except Exception:
+                spd = 0.0
+            speeds.append((line, spd))
 
-    # Сортируем по убыванию скорости: самая высокая скорость сверху
-    results.sort(key=lambda item: item[0], reverse=True)
-    sorted_configs = [item[1] for item in results]
+    hosts = [hp[0] for line, _ in speeds if (hp := extract_host_port(line))]
+    prefetch_countries_batch(hosts)
 
-    if sorted_configs:
+    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
+    ranked = []
+    for line, spd in speeds:
+        if spd < MIN_SPEED_MBPS:
+            continue
+        hp = extract_host_port(line)
+        country_name, country_code = get_country(hp[0]) if hp else ("Unknown", "")
+        if country_code in BLOCKED_COUNTRIES:
+            continue
+        flag = country_code_to_flag(country_code)
+        label = f"{flag} {country_name} | последнее обновление {updated_at} | {spd:.1f} Mbps | {TAG_HANDLE}"
+        renamed = rename_config_with_label(line, label)
+        ranked.append((spd, renamed))
+
+    # От самой высокой скорости к меньшей
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    final_configs = [item[1] for item in ranked]
+
+    if final_configs:
+        header = f"#profile-title: {PANEL_TITLE}"
+        plain_text = "\n".join([header] + final_configs) + "\n"
         with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
-            f.write(f"# profile-title: {SUBSCRIPTION_TITLE}\n")
-            for cfg in sorted_configs:
-                f.write(cfg + "\n")
+            f.write(plain_text)
 
-        raw_sub_text = "\n".join([f"# profile-title: {SUBSCRIPTION_TITLE}"] + sorted_configs)
-        b64_sub = base64.b64encode(raw_sub_text.encode("utf-8")).decode("utf-8")
+        b64_sub = base64.b64encode(plain_text.encode("utf-8")).decode("utf-8") + "\n"
         with open(SUBSCRIPTION_OUTPUT, "w", encoding="utf-8") as f:
-            f.write(b64_sub + "\n")
+            f.write(b64_sub)
+
+        upload_to_github_with_retry(plain_text, WORKING_OUTPUT)
+        upload_to_github_with_retry(b64_sub, SUBSCRIPTION_OUTPUT)
+        log(f"Сохранено серверов: {len(final_configs)} | Топ скорость: {ranked[0][0]:.1f} Mbps")
     else:
-        log("No configs passed speed/check threshold; keeping existing subscription files untouched")
+        log(f"Ни один сервер не прошёл порог скорости >= {MIN_SPEED_MBPS} Mbps.")
 
-    updated_blacklist = sorted(blacklist.union(failed))
-    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
-        for item in updated_blacklist:
-            f.write(item + "\n")
-
-    top_speed = results[0][0] if results else 0.0
-    log(
-        f"Done in {time.monotonic() - started_at:.1f}s | Subscription: {SUBSCRIPTION_TITLE} | "
-        f"Working: {len(sorted_configs)} | Top speed: {top_speed:.1f} Mbps | Failed: {len(failed)}"
-    )
+    save_blacklist()
 
 
 if __name__ == "__main__":
