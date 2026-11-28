@@ -37,29 +37,40 @@ TAG_HANDLE = "@qw1lsVPN"
 BLACKLIST_AGE_LIMIT = int(os.getenv("BLACKLIST_AGE_LIMIT", str(30 * 60)))
 
 TIMEOUT_PER_URL = float(os.getenv("TIMEOUT_PER_URL", "4.0"))
+POP_APP_TIMEOUT = float(os.getenv("POP_APP_TIMEOUT", "4.5"))
 MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "800"))
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
 SPEEDTEST_TIMEOUT = float(os.getenv("SPEEDTEST_TIMEOUT", "4.5"))
 MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
 MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
 MIN_TRANSFER_BYTES = int(os.getenv("MIN_TRANSFER_BYTES", "65536"))
-MIN_APP_HITS = int(os.getenv("MIN_APP_HITS", "2"))
+MIN_POP_APP_HITS = int(os.getenv("MIN_POP_APP_HITS", "3"))
 
 PING_WORKERS = int(os.getenv("PING_WORKERS", "100"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "28"))
+THIRD_CHECK_WORKERS = int(os.getenv("THIRD_CHECK_WORKERS", "20"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "10"))
 XRAY_STARTUP_TIMEOUT = 2.0
 
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "0"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
 
-APP_TEST_URLS = [
-    "https://telegram.org",
-    "https://www.youtube.com/generate_204",
-    "https://www.instagram.com",
-    "https://www.tiktok.com",
+# Шаг 2: базовая проверка доступности и скорости
+BASE_TEST_URLS = [
     "https://www.gstatic.com/generate_204",
+    "https://cp.cloudflare.com/generate_204",
 ]
+
+# Шаг 3: проверка на популярных приложениях / сервисах (в 20 потоков)
+POP_APP_URLS = [
+    ("Cloudflare", "https://cp.cloudflare.com/generate_204"),
+    ("TikTok", "https://www.tiktok.com"),
+    ("Gemini", "https://gemini.google.com"),
+    ("YouTube", "https://www.youtube.com/generate_204"),
+    ("Telegram", "https://telegram.org"),
+    ("Instagram", "https://www.instagram.com"),
+]
+
 SPEEDTEST_URLS = [
     "https://speed.cloudflare.com/__down?bytes=3000000",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
@@ -471,6 +482,7 @@ def _stop_xray(proc, path) -> None:
             pass
 
 
+# --- Шаг 1: TCP-пинг ---
 def quick_reachability_check(line: str) -> Optional[str]:
     original = line.strip()
     hp = extract_host_port(original)
@@ -488,6 +500,7 @@ def quick_reachability_check(line: str) -> Optional[str]:
     return original
 
 
+# --- Шаг 2: Базовый Xray-тест и замер скорости ---
 def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
     original = line.strip()
     hp = extract_host_port(original)
@@ -518,16 +531,17 @@ def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
             "https": f"socks5h://127.0.0.1:{socks_port}",
         }
 
-        hits = 0
-        for url in APP_TEST_URLS:
+        probe_ok = False
+        for url in BASE_TEST_URLS:
             try:
                 r = requests.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
-                if r.status_code in (200, 204):
-                    hits += 1
+                if 200 <= r.status_code < 400:
+                    probe_ok = True
+                    break
             except requests.RequestException:
                 continue
 
-        if hits < MIN_APP_HITS:
+        if not probe_ok:
             add_to_blacklist_local(host, port)
             return None
 
@@ -559,6 +573,52 @@ def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
         return original, round(statistics.median(speeds), 1)
     except Exception:
         add_to_blacklist_local(host, port)
+        return None
+    finally:
+        _stop_xray(proc, cfg)
+
+
+# --- Шаг 3: Проверка на популярных приложениях (Cloudflare, TikTok, Gemini, YouTube, Telegram, Instagram) ---
+def pop_apps_check(item: tuple[str, float]) -> Optional[tuple[str, float]]:
+    line, spd = item
+    hp = extract_host_port(line)
+    if not hp:
+        return None
+    host, port = hp
+
+    outbound = _line_to_outbound(line)
+    if not outbound:
+        return None
+
+    socks_port = get_free_port()
+    proc, cfg = _spawn_xray(outbound, socks_port)
+    if not proc:
+        return None
+
+    try:
+        if not wait_for_port(socks_port):
+            return None
+
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{socks_port}",
+            "https": f"socks5h://127.0.0.1:{socks_port}",
+        }
+
+        app_hits = 0
+        for _, url in POP_APP_URLS:
+            try:
+                r = requests.get(url, proxies=proxies, timeout=POP_APP_TIMEOUT)
+                if 200 <= r.status_code < 400:
+                    app_hits += 1
+            except requests.RequestException:
+                continue
+
+        if app_hits < MIN_POP_APP_HITS:
+            add_to_blacklist_local(host, port)
+            return None
+
+        return line, spd
+    except Exception:
         return None
     finally:
         _stop_xray(proc, cfg)
@@ -713,7 +773,7 @@ def main() -> None:
         log(f"Проверяем все {len(configs)} уникальных конфигов.")
 
     total = len(configs)
-    log(f"Фаза 1/2: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
+    log(f"Шаг 1/3: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
 
     alive = []
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
@@ -726,14 +786,14 @@ def main() -> None:
             if res:
                 alive.append(res)
             if i % 500 == 0 or i == total:
-                log(f"  пинг: {i}/{total}, живых: {len(alive)}")
+                log(f"  шаг 1 (пинг): {i}/{total}, живых: {len(alive)}")
 
     if not time_left(started_at):
-        log("Лимит времени после фазы 1.")
+        log("Лимит времени после шага 1.")
         save_blacklist()
         return
 
-    log(f"Фаза 2/2: Xray-тест по популярным сервисам и скорость ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    log(f"Шаг 2/3: Базовый Xray-тест и скорость ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
     measured: list[tuple[str, float]] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(test_and_measure_config, c): c for c in alive}
@@ -747,19 +807,49 @@ def main() -> None:
             if res:
                 measured.append(res)
             if done % 100 == 0 or done == len(alive):
-                log(f"  xray+сервисы+скорость: {done}/{len(alive)}, прошло: {len(measured)}")
+                log(f"  шаг 2 (xray+скорость): {done}/{len(alive)}, прошло: {len(measured)}")
+
+    if not measured:
+        log("Рабочих серверов не найдено после шага 2 — оставляем текущий working_configs.txt без перезаписи.")
+        save_blacklist()
+        return
+
+    if not time_left(started_at):
+        log("Лимит времени перед шагом 3.")
+        save_blacklist()
+        return
+
+    app_names = ", ".join(name for name, _ in POP_APP_URLS)
+    log(
+        f"Шаг 3/3: Проверка на популярных сервисах ({app_names}) "
+        f"в {THIRD_CHECK_WORKERS} потоках (нужно >= {MIN_POP_APP_HITS}/{len(POP_APP_URLS)})..."
+    )
+    checked: list[tuple[str, float]] = []
+    with ThreadPoolExecutor(max_workers=THIRD_CHECK_WORKERS) as ex:
+        futures = {ex.submit(pop_apps_check, item): item for item in measured}
+        done_apps = 0
+        for future in as_completed(futures):
+            done_apps += 1
+            try:
+                res = future.result()
+            except Exception:
+                res = None
+            if res:
+                checked.append(res)
+            if done_apps % 50 == 0 or done_apps == len(measured):
+                log(f"  шаг 3 (приложения): {done_apps}/{len(measured)}, прошло: {len(checked)}")
 
     save_blacklist()
 
-    if not measured:
-        log("Рабочих серверов не найдено — оставляем текущий working_configs.txt без перезаписи.")
+    if not checked:
+        log("Ни один сервер не прошёл проверку популярных приложений — файл не перезаписан.")
         return
 
-    hosts = [hp[0] for line, _ in measured if (hp := extract_host_port(line))]
+    hosts = [hp[0] for line, _ in checked if (hp := extract_host_port(line))]
     prefetch_countries_batch(hosts)
 
     ranked: list[tuple[float, str, str]] = []
-    for line, spd in measured:
+    for line, spd in checked:
         if spd < MIN_SPEED_MBPS:
             continue
         hp = extract_host_port(line)
