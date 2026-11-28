@@ -81,11 +81,13 @@ jobs:
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
           MAX_TCP_PING_MS: "800"
           TIMEOUT_PER_URL: "4.0"
+          POP_APP_TIMEOUT: "4.5"
           SPEEDTEST_TIMEOUT: "4.5"
           MIN_SPEED_MBPS: "0.5"
-          MIN_APP_HITS: "2"
+          MIN_POP_APP_HITS: "3"
           PING_WORKERS: "100"
           MAX_WORKERS: "28"
+          THIRD_CHECK_WORKERS: "20"
           MAX_CANDIDATES: "0"
           MAX_RUN_SECONDS: "1500"
         run: python checker.py
