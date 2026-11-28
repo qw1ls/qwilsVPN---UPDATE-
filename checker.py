@@ -26,33 +26,27 @@ SOURCES_LIST_URL = os.getenv(
 )
 RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
 RU_CHECK_URL = os.getenv("RU_CHECK_URL", "").strip()
-EGRESS_TRACE_URL = os.getenv("EGRESS_TRACE_URL", "https://cloudflare.com/cdn-cgi/trace").strip()
-TLS_PROBE_HOST = os.getenv("TLS_PROBE_HOST", "www.cloudflare.com").strip()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 BRANCH = os.getenv("BRANCH", "main").strip()
 
 WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
-SUBSCRIPTION_OUTPUT = os.getenv("SUBSCRIPTION_FILE", "subscription.txt").strip()
 BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
 
-PANEL_TITLE = "antiRKN FREE"
 TAG_HANDLE = "@qw1lsVPN"
 BLACKLIST_AGE_LIMIT = 5 * 3600
 
 TIMEOUT_PER_URL = int(os.getenv("TIMEOUT_PER_URL", "4"))
-TLS_CHECK_TIMEOUT = float(os.getenv("TLS_CHECK_TIMEOUT", "4"))
 MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "500"))
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
 SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "4"))
-MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.0"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
 MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
-MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "2"))
+MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "1"))
 
 PING_WORKERS = int(os.getenv("PING_WORKERS", "60"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "20"))
-THIRD_CHECK_WORKERS = int(os.getenv("THIRD_CHECK_WORKERS", "20"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "8"))
 SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "16"))
 XRAY_STARTUP_TIMEOUT = 2.0
@@ -559,55 +553,6 @@ def test_single_config(line: str):
         _stop_xray(proc, cfg)
 
 
-def tls_and_egress_check(line: str) -> Optional[str]:
-    original = line.strip()
-    hp = extract_host_port(original)
-    if not hp:
-        return None
-    host, port = hp
-
-    outbound = _line_to_outbound(original)
-    if not outbound:
-        return None
-
-    socks_port = get_free_port()
-    proc, cfg = _spawn_xray(outbound, socks_port)
-    if not proc:
-        return None
-
-    try:
-        if not wait_for_port(socks_port):
-            add_to_blacklist_local(host, port)
-            return None
-
-        proxies = {
-            "http": f"socks5h://127.0.0.1:{socks_port}",
-            "https": f"socks5h://127.0.0.1:{socks_port}",
-        }
-
-        r = requests.get(EGRESS_TRACE_URL, proxies=proxies, timeout=TLS_CHECK_TIMEOUT)
-        body = r.text.strip()
-        if r.status_code != 200 or ("ip=" not in body or "loc=" not in body):
-            add_to_blacklist_local(host, port)
-            return None
-
-        r_tls = requests.get(
-            f"https://{TLS_PROBE_HOST}/cdn-cgi/trace",
-            proxies=proxies,
-            timeout=TLS_CHECK_TIMEOUT,
-        )
-        if r_tls.status_code != 200 or "ip=" not in r_tls.text:
-            add_to_blacklist_local(host, port)
-            return None
-
-        return original
-    except Exception:
-        add_to_blacklist_local(host, port)
-        return None
-    finally:
-        _stop_xray(proc, cfg)
-
-
 def measure_speed_multi(line: str) -> float:
     outbound = _line_to_outbound(line)
     if not outbound:
@@ -789,7 +734,7 @@ def main() -> None:
         log(f"Ограничено до {MAX_CANDIDATES} кандидатов для быстрого прохода.")
 
     total = len(configs)
-    log(f"Фаза 1/3: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
+    log(f"Фаза 1/2: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
 
     alive = []
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
@@ -809,8 +754,8 @@ def main() -> None:
         save_blacklist()
         return
 
-    log(f"Фаза 2/3: Xray-тест по сайтам ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
-    stage2 = []
+    log(f"Фаза 2/2: Xray-тест по сайтам ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    working = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(test_single_config, c): c for c in alive}
         for i, future in enumerate(as_completed(futures), 1):
@@ -819,30 +764,11 @@ def main() -> None:
             except Exception:
                 res = None
             if res:
-                stage2.append(res[0])
+                working.append(res[0])
             if i % 100 == 0 or i == len(alive):
-                log(f"  xray-тест: {i}/{len(alive)}, прошло: {len(stage2)}")
+                log(f"  xray-тест: {i}/{len(alive)}, рабочих: {len(working)}")
 
-    if not time_left(started_at):
-        log("Достигнут лимит времени после фазы 2.")
-        save_blacklist()
-        return
-
-    log(f"Фаза 3/3: TLS/Egress-тест ({len(stage2)} конфигов, {THIRD_CHECK_WORKERS} потоков)...")
-    working = []
-    with ThreadPoolExecutor(max_workers=THIRD_CHECK_WORKERS) as ex:
-        futures = {ex.submit(tls_and_egress_check, c): c for c in stage2}
-        for i, future in enumerate(as_completed(futures), 1):
-            try:
-                res = future.result()
-            except Exception:
-                res = None
-            if res:
-                working.append(res)
-            if i % 100 == 0 or i == len(stage2):
-                log(f"  tls/egress-тест: {i}/{len(stage2)}, рабочих: {len(working)}")
-
-    log(f"Итого рабочих серверов после 3 проверок: {len(working)} из {total}")
+    log(f"Рабочих по Xray: {len(working)} из {total}")
     save_blacklist()
 
     if not working:
@@ -872,7 +798,7 @@ def main() -> None:
     hosts = [hp[0] for line, _ in speeds if (hp := extract_host_port(line))]
     prefetch_countries_batch(hosts)
 
-    ranked: list[tuple[float, str]] = []
+    ranked: list[tuple[float, str, str]] = []
     for line, spd in speeds:
         if spd < MIN_SPEED_MBPS:
             continue
@@ -881,26 +807,30 @@ def main() -> None:
         if country_code in BLOCKED_COUNTRIES:
             continue
         flag = country_code_to_flag(country_code)
-        label = f"{flag} {country_name} | {spd:.1f} Mbps | {TAG_HANDLE}"
+        country_display = f"{flag} {country_name}".strip()
+        label = f"{country_display} | {spd:.1f} Mbps | {TAG_HANDLE}"
         renamed = rename_config_with_label(line, label)
-        ranked.append((spd, renamed))
+        ranked.append((spd, country_display, renamed))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
-    final_configs = [item[1] for item in ranked]
+    final_configs = [item[2] for item in ranked]
 
     if final_configs:
-        header = f"#profile-title: {PANEL_TITLE}"
+        now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
+        fastest_location = ranked[0][1]
+        header = (
+            f"#profile-title: {TAG_HANDLE} | серверов - {len(final_configs)} | "
+            f"последнее обновление {now_str} | самая быстрая локация {fastest_location}"
+        )
         plain_text = "\n".join([header] + final_configs) + "\n"
         with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
             f.write(plain_text)
 
-        b64_sub = base64.b64encode(plain_text.encode("utf-8")).decode("utf-8") + "\n"
-        with open(SUBSCRIPTION_OUTPUT, "w", encoding="utf-8") as f:
-            f.write(b64_sub)
-
         upload_to_github_with_retry(plain_text, WORKING_OUTPUT)
-        upload_to_github_with_retry(b64_sub, SUBSCRIPTION_OUTPUT)
-        log(f"Готово! Сохранено серверов: {len(final_configs)} | Топ скорость: {ranked[0][0]:.1f} Mbps")
+        log(
+            f"Готово! Серверов: {len(final_configs)} | "
+            f"Самая быстрая локация: {fastest_location} ({ranked[0][0]:.1f} Mbps)"
+        )
     else:
         log(f"Ни один сервер не прошёл порог скорости >= {MIN_SPEED_MBPS} Mbps.")
 
