@@ -34,7 +34,6 @@ WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
 BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
 
 TAG_HANDLE = "@qw1lsVPN"
-# Короткий бан (30 мин), чтобы не выкидывать надолго временно моргнувшие ноды
 BLACKLIST_AGE_LIMIT = int(os.getenv("BLACKLIST_AGE_LIMIT", str(30 * 60)))
 
 TIMEOUT_PER_URL = float(os.getenv("TIMEOUT_PER_URL", "4.0"))
@@ -51,11 +50,9 @@ MAX_WORKERS = int(os.getenv("MAX_WORKERS", "28"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "10"))
 XRAY_STARTUP_TIMEOUT = 2.0
 
-# 0 или отрицательное значение = без ограничения (проверять все уникальные конфиги)
 MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "0"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
 
-# Популярные сервисы/площадки для проверки через Xray
 APP_TEST_URLS = [
     "https://telegram.org",
     "https://www.youtube.com/generate_204",
@@ -492,7 +489,6 @@ def quick_reachability_check(line: str) -> Optional[str]:
 
 
 def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
-    """Проверяет доступность популярных площадок через Xray + замеряет скорость."""
     original = line.strip()
     hp = extract_host_port(original)
     if not hp:
@@ -690,6 +686,18 @@ def upload_to_github_with_retry(content: str, file_path: str) -> bool:
     return False
 
 
+def build_subscription_header(server_count: int) -> list[str]:
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    time_str = now_utc.strftime("%H:%M")
+    date_str = now_utc.strftime("%d.%m.%Y")
+    return [
+        "#profile-web-page-url: https://github.com/qw1ls/vlessqwils",
+        "#support-url: https://t.me/qw1lsVPN",
+        "#profile-title: pockompozor t.me/qw1lsVPN",
+        f"#announce: t.me/qw1lsVPN | {server_count} - серверов · последнее обновление: {time_str} {date_str}",
+    ]
+
+
 def main() -> None:
     started_at = time.monotonic()
     load_blacklist()
@@ -768,20 +776,15 @@ def main() -> None:
     final_configs = [item[2] for item in ranked]
 
     if final_configs:
-        now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%d.%m %H:%M UTC")
-        fastest_location = ranked[0][1]
-        header = (
-            f"#profile-title: {TAG_HANDLE} | серверов - {len(final_configs)} | "
-            f"последнее обновление {now_str} | самая быстрая локация {fastest_location}"
-        )
-        plain_text = "\n".join([header] + final_configs) + "\n"
+        headers = build_subscription_header(len(final_configs))
+        plain_text = "\n".join(headers + final_configs) + "\n"
         with open(WORKING_OUTPUT, "w", encoding="utf-8") as f:
             f.write(plain_text)
 
         upload_to_github_with_retry(plain_text, WORKING_OUTPUT)
         log(
             f"Готово! Серверов: {len(final_configs)} | "
-            f"Самая быстрая локация: {fastest_location} ({ranked[0][0]:.1f} Mbps)"
+            f"Самая быстрая локация: {ranked[0][1]} ({ranked[0][0]:.1f} Mbps)"
         )
     else:
         log(f"Ни один сервер не прошёл порог >= {MIN_SPEED_MBPS} Mbps — файл не перезаписан.")
