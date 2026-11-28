@@ -79,6 +79,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
+          RKN_CHECK_URL: "https://roskompozor.ru/"
+          RKN_CHECK_MODE: "reject_blocked"
           MAX_TCP_PING_MS: "500"
           TIMEOUT_PER_URL: "4"
           TLS_CHECK_TIMEOUT: "4"
@@ -96,7 +98,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f working_configs.txt subscription.txt blacklist_local.txt || true
+          git add -f working_configs.txt blacklist_local.txt || true
           if ! git diff --staged --quiet; then
             git commit -m "chore: update antiRKN FREE configs"
             git pull --rebase origin "${{ github.ref_name }}"
