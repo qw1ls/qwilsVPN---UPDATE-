@@ -25,7 +25,16 @@ SOURCES_LIST_URL = os.getenv(
     "https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt",
 )
 RU_EGRESS_PROXY = os.getenv("RU_EGRESS_PROXY", "").strip()
-RU_CHECK_URL = os.getenv("RU_CHECK_URL", "").strip()
+
+# Сайт/API для 3-го шага проверки. Можно передать:
+# - URL с плейсхолдером: https://site.ru/api?target={host} или {ip}
+# - базовый URL со строкой запроса: https://site.ru/api?q= (подставит host в конец)
+RKN_CHECK_URL = os.getenv("RKN_CHECK_URL", "").strip()
+# "reject_blocked" — отсеивать заблокированные/найденные в реестре
+# "only_blocked"   — оставлять только такие
+RKN_CHECK_MODE = os.getenv("RKN_CHECK_MODE", "reject_blocked").strip().lower()
+RKN_CHECK_TIMEOUT = float(os.getenv("RKN_CHECK_TIMEOUT", "4.0"))
+RKN_CHECK_WORKERS = int(os.getenv("RKN_CHECK_WORKERS", "12"))
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
@@ -35,45 +44,55 @@ WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
 BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
 
 TAG_HANDLE = "@qw1lsVPN"
-BLACKLIST_AGE_LIMIT = 5 * 3600
+BLACKLIST_AGE_LIMIT = 4 * 3600
 
-TIMEOUT_PER_URL = int(os.getenv("TIMEOUT_PER_URL", "4"))
-MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "500"))
+TIMEOUT_PER_URL = float(os.getenv("TIMEOUT_PER_URL", "4.5"))
+MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "380"))
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
-SPEEDTEST_TIMEOUT = int(os.getenv("SPEEDTEST_TIMEOUT", "4"))
-MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
-MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
-MIN_SUCCESS = int(os.getenv("MIN_SUCCESS", "1"))
+SPEEDTEST_TIMEOUT = float(os.getenv("SPEEDTEST_TIMEOUT", "5.0"))
+MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "1.5"))
+MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "800.0"))
+MIN_TRANSFER_BYTES = int(os.getenv("MIN_TRANSFER_BYTES", "131072"))
 
 PING_WORKERS = int(os.getenv("PING_WORKERS", "60"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "20"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "18"))
 FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "8"))
-SPEEDTEST_WORKERS = int(os.getenv("SPEEDTEST_WORKERS", "16"))
 XRAY_STARTUP_TIMEOUT = 2.0
 
-MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "1200"))
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "1000"))
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "900"))
 
 TEST_URLS = [
     "https://www.gstatic.com/generate_204",
-    "https://telegram.org",
-    "https://www.instagram.com",
-    "https://tiktok.com",
+    "https://cp.cloudflare.com/generate_204",
 ]
 SPEEDTEST_URLS = [
+    "https://speed.cloudflare.com/__down?bytes=3000000",
     "https://raw.githubusercontent.com/BitDoctor/speed-test-file/refs/heads/master/5mb.txt",
-    "https://speed.cloudflare.com/__down?bytes=5000000",
 ]
 BLOCKED_COUNTRIES = {"JP", "VN", "AF", "IR", "TM", "CN", "KR"}
 
+BLOCKED_MARKERS = (
+    "blocked",
+    "banned",
+    "restricted",
+    "registry",
+    "реестр",
+    "заблокирован",
+    "ограничен",
+    "доступ ограничен",
+)
+
 blacklist_dict: dict[tuple[str, int], int] = {}
 blacklist_lock = Lock()
+rkn_cache: dict[str, Optional[bool]] = {}
+rkn_lock = Lock()
 country_cache: dict[str, tuple[str, str]] = {}
 dns_cache: dict[str, Optional[str]] = {}
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0", "Connection": "close"})
-_retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503])
+_retry = Retry(total=1, backoff_factor=0.25, status_forcelist=[429, 500, 502, 503])
 _adapter = HTTPAdapter(max_retries=_retry, pool_connections=30, pool_maxsize=30)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
@@ -476,6 +495,7 @@ def _stop_xray(proc, path) -> None:
             pass
 
 
+# --- Шаг 1: TCP-пинг ---
 def quick_reachability_check(line: str) -> Optional[str]:
     original = line.strip()
     hp = extract_host_port(original)
@@ -493,7 +513,8 @@ def quick_reachability_check(line: str) -> Optional[str]:
     return original
 
 
-def test_single_config(line: str):
+# --- Шаг 2: Xray-тест + реальная передача данных и замер скорости ---
+def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
     original = line.strip()
     hp = extract_host_port(original)
     if not hp:
@@ -523,52 +544,21 @@ def test_single_config(line: str):
             "https": f"socks5h://127.0.0.1:{socks_port}",
         }
 
-        if RU_CHECK_URL:
-            try:
-                r_ru = requests.get(RU_CHECK_URL, proxies=proxies, timeout=TIMEOUT_PER_URL)
-                if r_ru.status_code >= 500:
-                    add_to_blacklist_local(host, port)
-                    return None
-            except requests.RequestException:
-                add_to_blacklist_local(host, port)
-                return None
-
-        success = 0
+        probe_ok = False
         for url in TEST_URLS:
             try:
                 r = requests.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
                 if r.status_code in (200, 204):
-                    success += 1
-                    if success >= MIN_SUCCESS:
-                        return original, host
+                    probe_ok = True
+                    break
             except requests.RequestException:
                 continue
 
-        add_to_blacklist_local(host, port)
-        return None
-    except Exception:
-        add_to_blacklist_local(host, port)
-        return None
-    finally:
-        _stop_xray(proc, cfg)
+        if not probe_ok:
+            add_to_blacklist_local(host, port)
+            return None
 
-
-def measure_speed_multi(line: str) -> float:
-    outbound = _line_to_outbound(line)
-    if not outbound:
-        return 0.0
-    socks_port = get_free_port()
-    proc, cfg = _spawn_xray(outbound, socks_port)
-    if not proc:
-        return 0.0
-    try:
-        if not wait_for_port(socks_port):
-            return 0.0
-        proxies = {
-            "http": f"socks5h://127.0.0.1:{socks_port}",
-            "https": f"socks5h://127.0.0.1:{socks_port}",
-        }
-        run_speeds: list[float] = []
+        speeds: list[float] = []
         for url in SPEEDTEST_URLS:
             try:
                 with requests.get(url, proxies=proxies, timeout=SPEEDTEST_TIMEOUT, stream=True) as r:
@@ -580,24 +570,112 @@ def measure_speed_multi(line: str) -> float:
                         if not chunk:
                             break
                         downloaded += len(chunk)
-                        elapsed = time.perf_counter() - start
-                        if elapsed >= SPEEDTEST_TIMEOUT or downloaded >= 3 * 1024 * 1024:
+                        if (time.perf_counter() - start) >= SPEEDTEST_TIMEOUT or downloaded >= 3 * 1024 * 1024:
                             break
                     elapsed = time.perf_counter() - start
-                    if downloaded >= 65536 and elapsed >= 0.25:
+                    if downloaded >= MIN_TRANSFER_BYTES and elapsed >= 0.25:
                         mbps = (downloaded * 8.0) / (elapsed * 1_000_000.0)
-                        if 0.0 < mbps <= MAX_SANE_SPEED_MBPS:
-                            run_speeds.append(mbps)
+                        if MIN_SPEED_MBPS <= mbps <= MAX_SANE_SPEED_MBPS:
+                            speeds.append(mbps)
             except requests.RequestException:
                 continue
 
-        if not run_speeds:
-            return 0.0
-        return round(statistics.median(run_speeds), 1)
+        if not speeds:
+            return None
+
+        return original, round(statistics.median(speeds), 1)
     except Exception:
-        return 0.0
+        add_to_blacklist_local(host, port)
+        return None
     finally:
         _stop_xray(proc, cfg)
+
+
+# --- Шаг 3: Проверка через внешний сайт / API ---
+def _build_rkn_url(host: str, ip: str) -> str:
+    url = RKN_CHECK_URL
+    q_host = urllib.parse.quote(host)
+    q_ip = urllib.parse.quote(ip)
+    if "{host}" in url or "{ip}" in url:
+        return url.replace("{host}", q_host).replace("{ip}", q_ip)
+    if url.endswith(("=", "?", "&")):
+        return f"{url}{q_host}"
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}target={q_host}"
+
+
+def _interpret_rkn_response(text: str) -> Optional[bool]:
+    """Возвращает True если заблокирован/в реестре, False если нет, None если ответ неоднозначен."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        data = json.loads(stripped)
+        if isinstance(data, dict):
+            for key in ("blocked", "is_blocked", "banned", "in_registry", "restricted"):
+                if key in data and isinstance(data[key], bool):
+                    return data[key]
+            status_val = str(data.get("status", "")).lower()
+            if status_val in ("blocked", "banned", "restricted", "found"):
+                return True
+            if status_val in ("ok", "clean", "allowed", "not_found", "unblocked"):
+                return False
+    except Exception:
+        pass
+
+    lower = stripped.lower()
+    if any(m in lower for m in BLOCKED_MARKERS):
+        return True
+    if any(k in lower for k in ("не найден", "не заблокирован", "not blocked", "not in registry", "clean", "ok")):
+        return False
+    return None
+
+
+def rkn_site_check(item: tuple[str, float]) -> Optional[tuple[str, float]]:
+    line, spd = item
+    if not RKN_CHECK_URL:
+        return item
+
+    hp = extract_host_port(line)
+    if not hp:
+        return None
+    host, port = hp
+    ip = resolve_host(host) or host
+    cache_key = f"{host}|{ip}"
+
+    with rkn_lock:
+        if cache_key in rkn_cache:
+            cached = rkn_cache[cache_key]
+        else:
+            cached = None
+
+    is_blocked: Optional[bool] = cached
+    if is_blocked is None:
+        target_url = _build_rkn_url(host, ip)
+        proxies = {"http": RU_EGRESS_PROXY, "https": RU_EGRESS_PROXY} if RU_EGRESS_PROXY else None
+        try:
+            r = _session.get(target_url, timeout=RKN_CHECK_TIMEOUT, proxies=proxies)
+            if r.status_code == 200:
+                is_blocked = _interpret_rkn_response(r.text)
+        except requests.RequestException:
+            is_blocked = None
+
+        with rkn_lock:
+            rkn_cache[cache_key] = is_blocked
+
+    # Если сайт вернул неопределённый ответ или упал — не режем сервер по ошибке
+    if is_blocked is None:
+        return item
+
+    if RKN_CHECK_MODE == "only_blocked":
+        if not is_blocked:
+            return None
+    else:
+        if is_blocked:
+            add_to_blacklist_local(host, port)
+            return None
+
+    return item
 
 
 def fetch_configs_from_source(url: str) -> list[str]:
@@ -731,10 +809,10 @@ def main() -> None:
     if len(configs) > MAX_CANDIDATES:
         random.shuffle(configs)
         configs = configs[:MAX_CANDIDATES]
-        log(f"Ограничено до {MAX_CANDIDATES} кандидатов для быстрого прохода.")
+        log(f"Ограничено до {MAX_CANDIDATES} кандидатов.")
 
     total = len(configs)
-    log(f"Фаза 1/2: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
+    log(f"Шаг 1/3: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
 
     alive = []
     with ThreadPoolExecutor(max_workers=PING_WORKERS) as ex:
@@ -747,61 +825,69 @@ def main() -> None:
             if res:
                 alive.append(res)
             if i % 300 == 0 or i == total:
-                log(f"  пинг: {i}/{total}, живых: {len(alive)}")
+                log(f"  шаг 1 (пинг): {i}/{total}, живых: {len(alive)}")
 
     if not time_left(started_at):
-        log("Достигнут лимит времени после фазы 1.")
+        log("Лимит времени после шага 1.")
         save_blacklist()
         return
 
-    log(f"Фаза 2/2: Xray-тест по сайтам ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
-    working = []
+    log(f"Шаг 2/3: Xray-тест и замер скорости ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    measured: list[tuple[str, float]] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(test_single_config, c): c for c in alive}
-        for i, future in enumerate(as_completed(futures), 1):
+        futures = {ex.submit(test_and_measure_config, c): c for c in alive}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
             try:
                 res = future.result()
             except Exception:
                 res = None
             if res:
-                working.append(res[0])
-            if i % 100 == 0 or i == len(alive):
-                log(f"  xray-тест: {i}/{len(alive)}, рабочих: {len(working)}")
+                measured.append(res)
+            if done % 50 == 0 or done == len(alive):
+                log(f"  шаг 2 (xray+скорость): {done}/{len(alive)}, прошло: {len(measured)}")
 
-    log(f"Рабочих по Xray: {len(working)} из {total}")
     save_blacklist()
 
-    if not working:
-        log("Рабочих серверов не найдено.")
+    if not measured:
+        log("Рабочих серверов не найдено после шага 2.")
         return
 
     if not time_left(started_at):
-        log("Достигнут лимит времени перед замером скорости.")
+        log("Лимит времени перед шагом 3.")
         return
 
-    log(f"Замер скорости ({len(working)} серверов, {SPEEDTEST_WORKERS} потоков)...")
-    speeds: list[tuple[str, float]] = []
-    with ThreadPoolExecutor(max_workers=SPEEDTEST_WORKERS) as ex:
-        futures = {ex.submit(measure_speed_multi, line): line for line in working}
-        done_spd = 0
-        for future in as_completed(futures):
-            done_spd += 1
-            line = futures[future]
-            try:
-                spd = future.result()
-            except Exception:
-                spd = 0.0
-            speeds.append((line, spd))
-            if done_spd % 50 == 0 or done_spd == len(working):
-                log(f"  скорость: {done_spd}/{len(working)}")
+    if RKN_CHECK_URL:
+        log(f"Шаг 3/3: проверка через сайт ({len(measured)} серверов, режим={RKN_CHECK_MODE})...")
+        checked: list[tuple[str, float]] = []
+        with ThreadPoolExecutor(max_workers=RKN_CHECK_WORKERS) as ex:
+            futures = {ex.submit(rkn_site_check, item): item for item in measured}
+            done_rkn = 0
+            for future in as_completed(futures):
+                done_rkn += 1
+                try:
+                    res = future.result()
+                except Exception:
+                    res = None
+                if res:
+                    checked.append(res)
+                if done_rkn % 50 == 0 or done_rkn == len(measured):
+                    log(f"  шаг 3 (сайт): {done_rkn}/{len(measured)}, прошло: {len(checked)}")
+        save_blacklist()
+    else:
+        log("Шаг 3/3 пропущен: RKN_CHECK_URL не задан.")
+        checked = measured
 
-    hosts = [hp[0] for line, _ in speeds if (hp := extract_host_port(line))]
+    if not checked:
+        log("После 3-го шага проверки ничего не осталось.")
+        return
+
+    hosts = [hp[0] for line, _ in checked if (hp := extract_host_port(line))]
     prefetch_countries_batch(hosts)
 
     ranked: list[tuple[float, str, str]] = []
-    for line, spd in speeds:
-        if spd < MIN_SPEED_MBPS:
-            continue
+    for line, spd in checked:
         hp = extract_host_port(line)
         country_name, country_code = get_country(hp[0]) if hp else ("Unknown", "")
         if country_code in BLOCKED_COUNTRIES:
@@ -832,7 +918,7 @@ def main() -> None:
             f"Самая быстрая локация: {fastest_location} ({ranked[0][0]:.1f} Mbps)"
         )
     else:
-        log(f"Ни один сервер не прошёл порог скорости >= {MIN_SPEED_MBPS} Mbps.")
+        log("Ни один сервер не прошёл итоговую фильтрацию.")
 
 
 if __name__ == "__main__":
