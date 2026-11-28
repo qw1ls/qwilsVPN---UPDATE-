@@ -34,29 +34,34 @@ WORKING_OUTPUT = os.getenv("OUTPUT_FILE", "working_configs.txt").strip()
 BLACKLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blacklist_local.txt")
 
 TAG_HANDLE = "@qw1lsVPN"
-# Короткий бан (45 мин), чтобы не забивать блэклист временными сбоями
-BLACKLIST_AGE_LIMIT = int(os.getenv("BLACKLIST_AGE_LIMIT", str(45 * 60)))
+# Короткий бан (30 мин), чтобы не выкидывать надолго временно моргнувшие ноды
+BLACKLIST_AGE_LIMIT = int(os.getenv("BLACKLIST_AGE_LIMIT", str(30 * 60)))
 
-TIMEOUT_PER_URL = float(os.getenv("TIMEOUT_PER_URL", "5.0"))
-MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "900"))
+TIMEOUT_PER_URL = float(os.getenv("TIMEOUT_PER_URL", "4.0"))
+MAX_TCP_PING_MS = float(os.getenv("MAX_TCP_PING_MS", "800"))
 TCP_PING_TIMEOUT = MAX_TCP_PING_MS / 1000.0
-SPEEDTEST_TIMEOUT = float(os.getenv("SPEEDTEST_TIMEOUT", "5.0"))
+SPEEDTEST_TIMEOUT = float(os.getenv("SPEEDTEST_TIMEOUT", "4.5"))
 MIN_SPEED_MBPS = float(os.getenv("MIN_SPEED_MBPS", "0.5"))
 MAX_SANE_SPEED_MBPS = float(os.getenv("MAX_SANE_SPEED_MBPS", "1000.0"))
-MIN_TRANSFER_BYTES = int(os.getenv("MIN_TRANSFER_BYTES", "65536"))  # минимум 64 KB
+MIN_TRANSFER_BYTES = int(os.getenv("MIN_TRANSFER_BYTES", "65536"))
+MIN_APP_HITS = int(os.getenv("MIN_APP_HITS", "2"))
 
-PING_WORKERS = int(os.getenv("PING_WORKERS", "60"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "18"))
-FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "8"))
-XRAY_STARTUP_TIMEOUT = 2.5
+PING_WORKERS = int(os.getenv("PING_WORKERS", "100"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "28"))
+FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "10"))
+XRAY_STARTUP_TIMEOUT = 2.0
 
-MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "1200"))
-MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "900"))
+# 0 или отрицательное значение = без ограничения (проверять все уникальные конфиги)
+MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "0"))
+MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "1500"))
 
-TEST_URLS = [
-    "https://www.gstatic.com/generate_204",
-    "https://cp.cloudflare.com/generate_204",
+# Популярные сервисы/площадки для проверки через Xray
+APP_TEST_URLS = [
     "https://telegram.org",
+    "https://www.youtube.com/generate_204",
+    "https://www.instagram.com",
+    "https://www.tiktok.com",
+    "https://www.gstatic.com/generate_204",
 ]
 SPEEDTEST_URLS = [
     "https://speed.cloudflare.com/__down?bytes=3000000",
@@ -71,8 +76,8 @@ dns_cache: dict[str, Optional[str]] = {}
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": "Mozilla/5.0", "Connection": "close"})
-_retry = Retry(total=1, backoff_factor=0.25, status_forcelist=[429, 500, 502, 503])
-_adapter = HTTPAdapter(max_retries=_retry, pool_connections=30, pool_maxsize=30)
+_retry = Retry(total=1, backoff_factor=0.2, status_forcelist=[429, 500, 502, 503])
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=40, pool_maxsize=40)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 
@@ -487,6 +492,7 @@ def quick_reachability_check(line: str) -> Optional[str]:
 
 
 def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
+    """Проверяет доступность популярных площадок через Xray + замеряет скорость."""
     original = line.strip()
     hp = extract_host_port(original)
     if not hp:
@@ -516,17 +522,16 @@ def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
             "https": f"socks5h://127.0.0.1:{socks_port}",
         }
 
-        probe_ok = False
-        for url in TEST_URLS:
+        hits = 0
+        for url in APP_TEST_URLS:
             try:
                 r = requests.get(url, proxies=proxies, timeout=TIMEOUT_PER_URL)
                 if r.status_code in (200, 204):
-                    probe_ok = True
-                    break
+                    hits += 1
             except requests.RequestException:
                 continue
 
-        if not probe_ok:
+        if hits < MIN_APP_HITS:
             add_to_blacklist_local(host, port)
             return None
 
@@ -553,7 +558,6 @@ def test_and_measure_config(line: str) -> Optional[tuple[str, float]]:
                 continue
 
         if not speeds:
-            # Если сайт открылся, но спидтест не успел за короткое окно — даём минимальную оценку, чтобы живой конфиг не пропал
             return original, 0.5
 
         return original, round(statistics.median(speeds), 1)
@@ -692,10 +696,13 @@ def main() -> None:
     log(f"Чёрный список: {len(blacklist_dict)}")
 
     configs = fetch_all_configs_dedup()
-    if len(configs) > MAX_CANDIDATES:
+    if MAX_CANDIDATES > 0 and len(configs) > MAX_CANDIDATES:
         random.shuffle(configs)
         configs = configs[:MAX_CANDIDATES]
         log(f"Ограничено до {MAX_CANDIDATES} кандидатов.")
+    else:
+        random.shuffle(configs)
+        log(f"Проверяем все {len(configs)} уникальных конфигов.")
 
     total = len(configs)
     log(f"Фаза 1/2: TCP-пинг ({PING_WORKERS} потоков) для {total} конфигов...")
@@ -710,7 +717,7 @@ def main() -> None:
                 res = None
             if res:
                 alive.append(res)
-            if i % 300 == 0 or i == total:
+            if i % 500 == 0 or i == total:
                 log(f"  пинг: {i}/{total}, живых: {len(alive)}")
 
     if not time_left(started_at):
@@ -718,7 +725,7 @@ def main() -> None:
         save_blacklist()
         return
 
-    log(f"Фаза 2/2: Xray-тест и замер скорости ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
+    log(f"Фаза 2/2: Xray-тест по популярным сервисам и скорость ({len(alive)} конфигов, {MAX_WORKERS} потоков)...")
     measured: list[tuple[str, float]] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(test_and_measure_config, c): c for c in alive}
@@ -731,8 +738,8 @@ def main() -> None:
                 res = None
             if res:
                 measured.append(res)
-            if done % 50 == 0 or done == len(alive):
-                log(f"  xray+скорость: {done}/{len(alive)}, прошло: {len(measured)}")
+            if done % 100 == 0 or done == len(alive):
+                log(f"  xray+сервисы+скорость: {done}/{len(alive)}, прошло: {len(measured)}")
 
     save_blacklist()
 
