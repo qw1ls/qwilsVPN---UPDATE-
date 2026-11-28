@@ -44,7 +44,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -79,19 +79,15 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCES_LIST_URL: https://raw.githubusercontent.com/qw1ls/qwilsVPN---UPDATE-/refs/heads/main/sources.txt
           RU_EGRESS_PROXY: ${{ secrets.RU_EGRESS_PROXY }}
-          RKN_CHECK_URL: "https://roskompozor.ru/"
-          RKN_CHECK_MODE: "reject_blocked"
-          MAX_TCP_PING_MS: "500"
-          TIMEOUT_PER_URL: "4"
-          TLS_CHECK_TIMEOUT: "4"
-          SPEEDTEST_TIMEOUT: "4"
-          MIN_SPEED_MBPS: "1.0"
-          PING_WORKERS: "60"
-          MAX_WORKERS: "20"
-          THIRD_CHECK_WORKERS: "20"
-          SPEEDTEST_WORKERS: "16"
-          MAX_CANDIDATES: "1200"
-          MAX_RUN_SECONDS: "900"
+          MAX_TCP_PING_MS: "800"
+          TIMEOUT_PER_URL: "4.0"
+          SPEEDTEST_TIMEOUT: "4.5"
+          MIN_SPEED_MBPS: "0.5"
+          MIN_APP_HITS: "2"
+          PING_WORKERS: "100"
+          MAX_WORKERS: "28"
+          MAX_CANDIDATES: "0"
+          MAX_RUN_SECONDS: "1500"
         run: python checker.py
 
       - name: Commit and push working configs
@@ -100,7 +96,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f working_configs.txt blacklist_local.txt || true
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update antiRKN FREE configs"
+            git commit -m "chore: update @qw1lsVPN configs"
             git pull --rebase origin "${{ github.ref_name }}"
             git push
           fi
